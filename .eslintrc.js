@@ -1,16 +1,29 @@
 // Note: All paths are relative to the directory in which eslint is being run, rather than the directory where this file
 // lives
 
+// ESLint config docs: https://eslint.org/docs/user-guide/configuring/
+
 module.exports = {
   root: true,
   env: {
-    es6: true,
+    es2017: true,
   },
   parserOptions: {
     ecmaVersion: 2018,
   },
-  extends: ['@sentry-internal/sdk'],
-  ignorePatterns: ['coverage/**', 'build/**', 'dist/**', 'esm/**', 'examples/**', 'test/manual/**', 'types/**'],
+  extends: ['@sentry-internal/sdk/src/base'],
+  ignorePatterns: [
+    'coverage/**',
+    'build/**',
+    'dist/**',
+    'cjs/**',
+    'esm/**',
+    'examples/**',
+    'test/manual/**',
+    'types/**',
+    'scripts/*.js',
+  ],
+  reportUnusedDisableDirectives: true,
   overrides: [
     {
       files: ['*.ts', '*.tsx', '*.d.ts'],
@@ -25,6 +38,12 @@ module.exports = {
       },
     },
     {
+      files: ['jest/**/*.ts', 'scripts/**/*.ts'],
+      parserOptions: {
+        project: ['tsconfig.dev.json'],
+      },
+    },
+    {
       files: ['*.tsx'],
       rules: {
         // Turn off jsdoc on tsx files until jsdoc is fixed for tsx files
@@ -33,12 +52,18 @@ module.exports = {
       },
     },
     {
-      files: ['scenarios/**'],
+      files: ['scenarios/**', 'dev-packages/rollup-utils/**', 'dev-packages/bundle-analyzer-scenarios/**'],
       parserOptions: {
         sourceType: 'module',
       },
       rules: {
         'no-console': 'off',
+      },
+    },
+    {
+      files: ['vite.config.ts'],
+      parserOptions: {
+        project: ['tsconfig.test.json'],
       },
     },
   ],

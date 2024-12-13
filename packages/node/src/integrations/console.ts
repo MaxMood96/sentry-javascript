@@ -1,55 +1,39 @@
-import { getCurrentHub } from '@sentry/core';
-import { Integration } from '@sentry/types';
-import { fill, severityFromString } from '@sentry/utils';
-import * as util from 'util';
+import * as util from 'node:util';
+import {
+  addBreadcrumb,
+  addConsoleInstrumentationHandler,
+  defineIntegration,
+  getClient,
+  severityLevelFromString,
+  truncate,
+} from '@sentry/core';
 
-/** Console module integration */
-export class Console implements Integration {
-  /**
-   * @inheritDoc
-   */
-  public static id: string = 'Console';
-
-  /**
-   * @inheritDoc
-   */
-  public name: string = Console.id;
-
-  /**
-   * @inheritDoc
-   */
-  public setupOnce(): void {
-    for (const level of ['debug', 'info', 'warn', 'error', 'log']) {
-      fill(console, level, createConsoleWrapper(level));
-    }
-  }
-}
+const INTEGRATION_NAME = 'Console';
 
 /**
- * Wrapper function that'll be used for every console level
+ * Capture console logs as breadcrumbs.
  */
-function createConsoleWrapper(level: string): (originalConsoleMethod: () => void) => void {
-  return function consoleWrapper(originalConsoleMethod: () => void): () => void {
-    const sentryLevel = severityFromString(level);
+export const consoleIntegration = defineIntegration(() => {
+  return {
+    name: INTEGRATION_NAME,
+    setup(client) {
+      addConsoleInstrumentationHandler(({ args, level }) => {
+        if (getClient() !== client) {
+          return;
+        }
 
-    /* eslint-disable prefer-rest-params */
-    return function (this: typeof console): void {
-      if (getCurrentHub().getIntegration(Console)) {
-        getCurrentHub().addBreadcrumb(
+        addBreadcrumb(
           {
             category: 'console',
-            level: sentryLevel,
-            message: util.format.apply(undefined, arguments),
+            level: severityLevelFromString(level),
+            message: truncate(util.format.apply(undefined, args), 2048), // 2KB
           },
           {
-            input: [...arguments],
+            input: [...args],
             level,
           },
         );
-      }
-
-      originalConsoleMethod.apply(this, arguments);
-    };
-    /* eslint-enable prefer-rest-params */
+      });
+    },
   };
-}
+});

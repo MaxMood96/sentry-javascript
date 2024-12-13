@@ -6,8 +6,15 @@ module.exports = {
   parserOptions: {
     jsx: true,
   },
-  // ignoring the package-specific prepack script here b/c it is not
-  // covered by a `tsconfig` which makes eslint throw an error
-  ignorePatterns: ['scripts/prepack.ts'],
+  // ignore these because they're not covered by a `tsconfig`, which makes eslint throw an error
+  ignorePatterns: ['gatsby-node.d.ts'],
+  overrides: [
+    {
+      files: ['scripts/**/*.ts'],
+      parserOptions: {
+        project: ['../../tsconfig.dev.json'],
+      },
+    },
+  ],
   extends: ['../../.eslintrc.js'],
 };

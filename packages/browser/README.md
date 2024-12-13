@@ -1,8 +1,7 @@
 <p align="center">
-  <a href="https://sentry.io" target="_blank" align="center">
-    <img src="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" width="280">
+  <a href="https://sentry.io/?utm_source=github&utm_medium=logo" target="_blank">
+    <img src="https://sentry-brand.storage.googleapis.com/sentry-wordmark-dark-280x84.png" alt="Sentry" width="280" height="84">
   </a>
-  <br />
 </p>
 
 # Official Sentry SDK for Browsers
@@ -11,7 +10,6 @@
 [![npm version](https://img.shields.io/npm/v/@sentry/browser.svg)](https://www.npmjs.com/package/@sentry/browser)
 [![npm dm](https://img.shields.io/npm/dm/@sentry/browser.svg)](https://www.npmjs.com/package/@sentry/browser)
 [![npm dt](https://img.shields.io/npm/dt/@sentry/browser.svg)](https://www.npmjs.com/package/@sentry/browser)
-[![typedoc](https://img.shields.io/badge/docs-typedoc-blue.svg)](http://getsentry.github.io/sentry-javascript/)
 
 ## Links
 
@@ -39,12 +37,9 @@ functions will not perform any action before you have called `Sentry.init()`:
 import * as Sentry from '@sentry/browser';
 
 // Set user information, as well as tags and further extras
-Sentry.configureScope(scope => {
-  scope.setExtra('battery', 0.7);
-  scope.setTag('user_mode', 'admin');
-  scope.setUser({ id: '4711' });
-  // scope.clear();
-});
+Sentry.setExtra('battery', 0.7);
+Sentry.setTag('user_mode', 'admin');
+Sentry.setUser({ id: '4711' });
 
 // Add a breadcrumb for future events
 Sentry.addBreadcrumb({

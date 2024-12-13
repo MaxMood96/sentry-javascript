@@ -1,16 +1,29 @@
 <p align="center">
-  <a href="https://sentry.io" target="_blank" align="center">
-    <img src="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" width="280">
+  <a href="https://sentry.io/?utm_source=github&utm_medium=logo" target="_blank">
+    <img src="https://sentry-brand.storage.googleapis.com/sentry-wordmark-dark-280x84.png" alt="Sentry" width="280" height="84">
   </a>
-  <br />
 </p>
 
 # Official Sentry SDK for Angular
+
+[![npm version](https://img.shields.io/npm/v/@sentry/angular.svg)](https://www.npmjs.com/package/@sentry/angular)
+[![npm dm](https://img.shields.io/npm/dm/@sentry/angular.svg)](https://www.npmjs.com/package/@sentry/angular)
+[![npm dt](https://img.shields.io/npm/dt/@sentry/angular.svg)](https://www.npmjs.com/package/@sentry/angular)
 
 ## Links
 
 - [Official SDK Docs](https://docs.sentry.io/platforms/javascript/angular/)
 - [TypeDoc](http://getsentry.github.io/sentry-javascript/)
+
+## Angular Version Compatibility
+
+This SDK officially supports Angular 15 to 17.
+
+If you're using an older Angular version please check the
+[compatibility table in the docs](https://docs.sentry.io/platforms/javascript/guides/angular/#angular-version-compatibility).
+
+If you're using an older version of Angular and experience problems with the Angular SDK, we recommend downgrading the
+SDK to version 7.x. Please note that we don't provide any support for Angular versions below 10.
 
 ## General
 
@@ -42,8 +55,8 @@ platformBrowserDynamic()
 
 ### ErrorHandler
 
-`@sentry/angular` exports a function to instantiate ErrorHandler provider that will automatically send Javascript errors
-captured by the Angular's error handler.
+`@sentry/angular` exports a function to instantiate an ErrorHandler provider that will automatically send Javascript
+errors captured by the Angular's error handler.
 
 ```javascript
 import { NgModule, ErrorHandler } from '@angular/core';
@@ -69,30 +82,24 @@ see `ErrorHandlerOptions` interface in `src/errorhandler.ts`.
 
 ### Tracing
 
-`@sentry/angular` exports a Trace Service, Directive and Decorators that leverage the `@sentry/tracing` Tracing
-integration to add Angular related spans to transactions. If the Tracing integration is not enabled, this functionality
-will not work. The service itself tracks route changes and durations, where directive and decorators are tracking
-components initializations.
+`@sentry/angular` exports a Trace Service, Directive and Decorators that leverage the tracing features to add
+Angular-related spans to transactions. If tracing is not enabled, this functionality will not work. The SDK's
+`TraceService` itself tracks route changes and durations, while directive and decorators are tracking components
+initializations.
 
 #### Install
 
 Registering a Trace Service is a 3-step process.
 
-1. Register and configure the `BrowserTracing` integration from `@sentry/tracing`, including custom Angular routing
-   instrumentation:
+1. Register and configure the `BrowserTracing` integration, including custom Angular routing instrumentation:
 
 ```javascript
-import { init, instrumentAngularRouting } from '@sentry/angular';
-import { Integrations as TracingIntegrations } from '@sentry/tracing';
+import { init, browserTracingIntegration } from '@sentry/angular';
 
 init({
   dsn: '__DSN__',
-  integrations: [
-    new TracingIntegrations.BrowserTracing({
-      tracingOrigins: ['localhost', 'https://yourserver.io/api'],
-      routingInstrumentation: instrumentAngularRouting,
-    }),
-  ],
+  integrations: [browserTracingIntegration()],
+  tracePropagationTargets: ['localhost', 'https://yourserver.io/api'],
   tracesSampleRate: 1,
 });
 ```
@@ -165,7 +172,7 @@ import { TraceModule } from '@sentry/angular';
 export class AppModule {}
 ```
 
-Then inside your components template (keep in mind that directive name attribute is required):
+Then, inside your component's template (keep in mind that the directive's name attribute is required):
 
 ```html
 <app-header trace="header"></app-header>
@@ -173,65 +180,56 @@ Then inside your components template (keep in mind that directive name attribute
 <app-footer trace="footer"></app-footer>
 ```
 
-_TraceClassDecorator:_ used to track a duration between `OnInit` and `AfterViewInit` lifecycle hooks in components:
+_TraceClass:_ used to track a duration between `OnInit` and `AfterViewInit` lifecycle hooks in components:
 
 ```javascript
 import { Component } from '@angular/core';
-import { TraceClassDecorator } from '@sentry/angular';
+import { TraceClass } from '@sentry/angular';
 
 @Component({
   selector: 'layout-header',
   templateUrl: './header.component.html',
 })
-@TraceClassDecorator()
+@TraceClass()
 export class HeaderComponent {
   // ...
 }
 ```
 
-_TraceMethodDecorator:_ used to track a specific lifecycle hooks as point-in-time spans in components:
+_TraceMethod:_ used to track a specific lifecycle hooks as point-in-time spans in components:
 
 ```javascript
 import { Component, OnInit } from '@angular/core';
-import { TraceMethodDecorator } from '@sentry/angular';
+import { TraceMethod } from '@sentry/angular';
 
 @Component({
   selector: 'app-footer',
   templateUrl: './footer.component.html',
 })
 export class FooterComponent implements OnInit {
-  @TraceMethodDecorator()
+  @TraceMethod()
   ngOnInit() {}
 }
 ```
 
-You can also add your own custom spans by attaching them to the current active transaction using `getActiveTransaction`
-helper. For example, if you'd like to track the duration of Angular boostraping process, you can do it as follows:
+You can also add your own custom spans via `startSpan()`. For example, if you'd like to track the duration of Angular
+boostraping process, you can do it as follows:
 
 ```javascript
 import { enableProdMode } from '@angular/core';
 import { platformBrowserDynamic } from '@angular/platform-browser-dynamic';
-import { init, getActiveTransaction } from '@sentry/angular';
+import { init, startSpan } from '@sentry/angular';
 
 import { AppModule } from './app/app.module';
 
 // ...
-
-const activeTransaction = getActiveTransaction();
-const boostrapSpan =
-  activeTransaction &&
-  activeTransaction.startChild({
-    description: 'platform-browser-dynamic',
+startSpan(
+  {
+    name: 'platform-browser-dynamic',
     op: 'ui.angular.bootstrap',
-  });
-
-platformBrowserDynamic()
-  .bootstrapModule(AppModule)
-  .then(() => console.log(`Bootstrap success`))
-  .catch(err => console.error(err));
-  .finally(() => {
-    if (bootstrapSpan) {
-      boostrapSpan.finish();
-    }
-  })
+  },
+  async () => {
+    await platformBrowserDynamic().bootstrapModule(AppModule);
+  },
+);
 ```

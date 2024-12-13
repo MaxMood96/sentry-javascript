@@ -1,4 +1,4 @@
-import { DebugImage } from '@sentry/types';
+import type { DebugImage } from '@sentry/core';
 
 export const IMAGES: Array<DebugImage> = [];
 
@@ -18,16 +18,18 @@ export function getModuleInfo(module: WebAssembly.Module): ModuleInfo {
   let buildId = null;
   let debugFile = null;
 
-  if (buildIds.length > 0) {
-    const firstBuildId = new Uint8Array(buildIds[0]);
+  const buildId0 = buildIds[0];
+  if (buildId0) {
+    const firstBuildId = new Uint8Array(buildId0);
     buildId = Array.from(firstBuildId).reduce((acc, x) => {
       return acc + x.toString(16).padStart(2, '0');
     }, '');
   }
 
   const externalDebugInfo = WebAssembly.Module.customSections(module, 'external_debug_info');
-  if (externalDebugInfo.length > 0) {
-    const firstExternalDebugInfo = new Uint8Array(externalDebugInfo[0]);
+  const externalDebugInfo0 = externalDebugInfo[0];
+  if (externalDebugInfo0) {
+    const firstExternalDebugInfo = new Uint8Array(externalDebugInfo0);
     const decoder = new TextDecoder('utf-8');
     debugFile = decoder.decode(firstExternalDebugInfo);
   }
@@ -41,16 +43,27 @@ export function getModuleInfo(module: WebAssembly.Module): ModuleInfo {
 export function registerModule(module: WebAssembly.Module, url: string): void {
   const { buildId, debugFile } = getModuleInfo(module);
   if (buildId) {
-    const oldIdx = IMAGES.findIndex(img => img.code_file === url);
+    const oldIdx = getImage(url);
     if (oldIdx >= 0) {
       IMAGES.splice(oldIdx, 1);
     }
+
+    let debugFileUrl = null;
+    if (debugFile) {
+      try {
+        debugFileUrl = new URL(debugFile, url).href;
+      } catch {
+        // debugFile could be a blob URL which causes the URL constructor to throw
+        // for now we just ignore this case
+      }
+    }
+
     IMAGES.push({
       type: 'wasm',
       code_id: buildId,
       code_file: url,
-      debug_file: debugFile ? new URL(debugFile, url).href : null,
-      debug_id: `${buildId.padEnd(32, '0').substr(0, 32)}0`,
+      debug_file: debugFileUrl,
+      debug_id: `${buildId.padEnd(32, '0').slice(0, 32)}0`,
     });
   }
 }
@@ -68,5 +81,7 @@ export function getImages(): Array<DebugImage> {
  * @param url the URL of the WebAssembly module.
  */
 export function getImage(url: string): number {
-  return IMAGES.findIndex(img => img.code_file === url);
+  return IMAGES.findIndex(image => {
+    return image.type === 'wasm' && image.code_file === url;
+  });
 }

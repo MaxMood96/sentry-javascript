@@ -1,34 +1,36 @@
-import { module, test } from 'qunit';
-import { setupTest } from 'ember-qunit';
 import Route from '@ember/routing/route';
 import { instrumentRoutePerformance } from '@sentry/ember';
+import { setupTest } from 'ember-qunit';
+import { module, test } from 'qunit';
 import sinon from 'sinon';
+
+import type { SentryTestContext } from '../helpers/setup-sentry';
 import { setupSentryTest } from '../helpers/setup-sentry';
 
 module('Unit | Utility | instrument-route-performance', function (hooks) {
   setupTest(hooks);
   setupSentryTest(hooks);
 
-  test('wrapped Route hooks maintain the current context', function (assert) {
+  test('wrapped Route hooks maintain the current context', function (this: SentryTestContext, assert) {
     const beforeModel = sinon.spy();
     const model = sinon.spy();
     const afterModel = sinon.spy();
     const setupController = sinon.spy();
 
     class DummyRoute extends Route {
-      beforeModel(...args: any[]) {
+      public beforeModel(...args: unknown[]): ReturnType<Route['beforeModel']> {
         return beforeModel.call(this, ...args);
       }
 
-      model(...args: any[]) {
+      public model(...args: unknown[]): unknown {
         return model.call(this, ...args);
       }
 
-      afterModel(...args: any[]) {
+      public afterModel(...args: unknown[]): ReturnType<Route['afterModel']> {
         return afterModel.call(this, ...args);
       }
 
-      setupController(...args: any[]) {
+      public setupController(...args: unknown[]): unknown {
         return setupController.call(this, ...args);
       }
     }
@@ -37,7 +39,7 @@ module('Unit | Utility | instrument-route-performance', function (hooks) {
 
     this.owner.register('route:dummy', InstrumentedDummyRoute);
 
-    const route = this.owner.lookup('route:dummy');
+    const route = this.owner.lookup('route:dummy') as DummyRoute;
 
     route.beforeModel('foo');
 

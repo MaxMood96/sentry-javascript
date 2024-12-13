@@ -1,42 +1,46 @@
 'use strict';
 
 module.exports = {
-  root: true,
-  parser: 'babel-eslint',
-  parserOptions: {
-    ecmaVersion: 2018,
-    sourceType: 'module',
-    ecmaFeatures: {
-      legacyDecorators: true,
-    },
-  },
-  plugins: ['ember'],
-  extends: ['eslint:recommended', 'plugin:ember/recommended'],
-  env: {
-    browser: true,
-  },
-  globals: {
-    QUnit: true,
-  },
-  rules: {},
+  extends: ['../../.eslintrc.js'],
+
   overrides: [
     {
-      files: ['addon/**'],
-      plugins: ['@sentry-internal/eslint-plugin-sdk'],
+      // addon files
+      files: ['{addon,app,tests}/**/*.{js,ts,d.ts}'],
+      parserOptions: {
+        sourceType: 'module',
+        babelOptions: {
+          plugins: [['@babel/plugin-proposal-decorators', { decoratorsBeforeExport: true }]],
+        },
+      },
+      plugins: ['ember'],
+      extends: ['plugin:ember/recommended'],
+      rules: {
+        'import/no-unresolved': 'off',
+      },
     },
-    // node files
+    {
+      // test files
+      files: ['tests/**/*-test.{js,ts}', 'tests/helpers/**/*.{js,ts}'],
+      extends: ['plugin:qunit/recommended'],
+      /*  globals: {
+        QUnit: true,
+      }, */
+      rules: {
+        'qunit/require-expect': 'off',
+      },
+    },
     {
       files: [
-        '.eslintrc.js',
-        '.template-lintrc.js',
-        'ember-cli-build.js',
-        'index.js',
-        'testem.js',
-        'blueprints/*/index.js',
-        'config/**/*.js',
-        'tests/dummy/config/**/*.js',
+        './.eslintrc.js',
+        './.template-lintrc.js',
+        './ember-cli-build.js',
+        './index.js',
+        './testem.js',
+        './blueprints/*/index.js',
+        './config/**/*.js',
+        './tests/dummy/config/**/*.js',
       ],
-      excludedFiles: ['addon/**', 'addon-test-support/**', 'app/**', 'tests/dummy/app/**'],
       parserOptions: {
         sourceType: 'script',
       },
@@ -44,8 +48,7 @@ module.exports = {
         browser: false,
         node: true,
       },
-      plugins: ['node'],
-      extends: ['plugin:node/recommended'],
+      extends: ['plugin:n/recommended'],
     },
   ],
 };
