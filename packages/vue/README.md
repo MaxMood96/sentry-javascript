@@ -1,8 +1,7 @@
 <p align="center">
-  <a href="https://sentry.io" target="_blank" align="center">
-    <img src="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" width="280">
+  <a href="https://sentry.io/?utm_source=github&utm_medium=logo" target="_blank">
+    <img src="https://sentry-brand.storage.googleapis.com/sentry-wordmark-dark-280x84.png" alt="Sentry" width="280" height="84">
   </a>
-  <br />
 </p>
 
 # Official Sentry SDK for Vue.js
@@ -29,26 +28,34 @@ const app = createApp({
 Sentry.init({
   app,
   dsn: '__PUBLIC_DSN__',
+  integrations: [
+    // Or omit `router` if you're not using vue-router
+    Sentry.browserTracingIntegration({ router }),
+  ],
 });
 ```
 
 ### Vue 2
 
 ```javascript
-import Vue from 'vue'
-import App from './App'
-import router from './router'
-import * as Sentry from '@sentry/vue'
+import Vue from 'vue';
+import App from './App';
+import router from './router';
+import * as Sentry from '@sentry/vue';
 
 Sentry.init({
   Vue: Vue,
   dsn: '__PUBLIC_DSN__',
-})
+  integrations: [
+    // Or omit `router` if you're not using vue-router
+    Sentry.browserTracingIntegration({ router }),
+  ],
+});
 
 new Vue({
   el: '#app',
   router,
   components: { App },
-  template: '<App/>'
-})
+  template: '<App/>',
+});
 ```

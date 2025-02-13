@@ -4,6 +4,7 @@
   "include": ["src/**/*"],
 
   "compilerOptions": {
-    // package-specific options
+    "lib": ["es2018", "es2020.string"],
+    "module": "Node16"
   }
 }

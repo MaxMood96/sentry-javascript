@@ -1,109 +1,88 @@
-import { getCurrentHub, Scope } from '@sentry/core';
-import { Integration } from '@sentry/types';
-import { consoleSandbox } from '@sentry/utils';
-
-import { logAndExitProcess } from './utils/errorhandling';
+import type { Client, IntegrationFn } from '@sentry/core';
+import { captureException, consoleSandbox, defineIntegration, getClient } from '@sentry/core';
+import { logAndExitProcess } from '../utils/errorhandling';
 
 type UnhandledRejectionMode = 'none' | 'warn' | 'strict';
 
-/** Global Promise Rejection handler */
-export class OnUnhandledRejection implements Integration {
+interface OnUnhandledRejectionOptions {
   /**
-   * @inheritDoc
+   * Option deciding what to do after capturing unhandledRejection,
+   * that mimicks behavior of node's --unhandled-rejection flag.
    */
-  public static id: string = 'OnUnhandledRejection';
+  mode: UnhandledRejectionMode;
+}
 
-  /**
-   * @inheritDoc
-   */
-  public name: string = OnUnhandledRejection.id;
+const INTEGRATION_NAME = 'OnUnhandledRejection';
 
-  /**
-   * @inheritDoc
-   */
-  public constructor(
-    private readonly _options: {
-      /**
-       * Option deciding what to do after capturing unhandledRejection,
-       * that mimicks behavior of node's --unhandled-rejection flag.
-       */
-      mode: UnhandledRejectionMode;
-    } = { mode: 'warn' },
-  ) {}
+const _onUnhandledRejectionIntegration = ((options: Partial<OnUnhandledRejectionOptions> = {}) => {
+  const mode = options.mode || 'warn';
 
-  /**
-   * @inheritDoc
-   */
-  public setupOnce(): void {
-    global.process.on('unhandledRejection', this.sendUnhandledPromise.bind(this));
-  }
+  return {
+    name: INTEGRATION_NAME,
+    setup(client) {
+      global.process.on('unhandledRejection', makeUnhandledPromiseHandler(client, { mode }));
+    },
+  };
+}) satisfies IntegrationFn;
 
-  /**
-   * Send an exception with reason
-   * @param reason string
-   * @param promise promise
-   */
-  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types, @typescript-eslint/no-explicit-any
-  public sendUnhandledPromise(reason: any, promise: any): void {
-    const hub = getCurrentHub();
+/**
+ * Add a global promise rejection handler.
+ */
+export const onUnhandledRejectionIntegration = defineIntegration(_onUnhandledRejectionIntegration);
 
-    if (!hub.getIntegration(OnUnhandledRejection)) {
-      this._handleRejection(reason);
+/**
+ * Send an exception with reason
+ * @param reason string
+ * @param promise promise
+ *
+ * Exported only for tests.
+ */
+export function makeUnhandledPromiseHandler(
+  client: Client,
+  options: OnUnhandledRejectionOptions,
+): (reason: unknown, promise: unknown) => void {
+  return function sendUnhandledPromise(reason: unknown, promise: unknown): void {
+    if (getClient() !== client) {
       return;
     }
 
-    /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-    const context = (promise.domain && promise.domain.sentryContext) || {};
-
-    hub.withScope((scope: Scope) => {
-      scope.setExtra('unhandledPromiseRejection', true);
-
-      // Preserve backwards compatibility with raven-node for now
-      if (context.user) {
-        scope.setUser(context.user);
-      }
-      if (context.tags) {
-        scope.setTags(context.tags);
-      }
-      if (context.extra) {
-        scope.setExtras(context.extra);
-      }
-
-      hub.captureException(reason, {
-        originalException: promise,
-        data: { mechanism: { handled: false, type: 'onunhandledrejection' } },
-      });
+    captureException(reason, {
+      originalException: promise,
+      captureContext: {
+        extra: { unhandledPromiseRejection: true },
+      },
+      mechanism: {
+        handled: false,
+        type: 'onunhandledrejection',
+      },
     });
-    /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 
-    this._handleRejection(reason);
+    handleRejection(reason, options);
+  };
+}
+
+/**
+ * Handler for `mode` option
+ */
+function handleRejection(reason: unknown, options: OnUnhandledRejectionOptions): void {
+  // https://github.com/nodejs/node/blob/7cf6f9e964aa00772965391c23acda6d71972a9a/lib/internal/process/promises.js#L234-L240
+  const rejectionWarning =
+    'This error originated either by ' +
+    'throwing inside of an async function without a catch block, ' +
+    'or by rejecting a promise which was not handled with .catch().' +
+    ' The promise rejected with the reason:';
+
+  /* eslint-disable no-console */
+  if (options.mode === 'warn') {
+    consoleSandbox(() => {
+      console.warn(rejectionWarning);
+      console.error(reason && typeof reason === 'object' && 'stack' in reason ? reason.stack : reason);
+    });
+  } else if (options.mode === 'strict') {
+    consoleSandbox(() => {
+      console.warn(rejectionWarning);
+    });
+    logAndExitProcess(reason);
   }
-
-  /**
-   * Handler for `mode` option
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _handleRejection(reason: any): void {
-    // https://github.com/nodejs/node/blob/7cf6f9e964aa00772965391c23acda6d71972a9a/lib/internal/process/promises.js#L234-L240
-    const rejectionWarning =
-      'This error originated either by ' +
-      'throwing inside of an async function without a catch block, ' +
-      'or by rejecting a promise which was not handled with .catch().' +
-      ' The promise rejected with the reason:';
-
-    /* eslint-disable no-console */
-    if (this._options.mode === 'warn') {
-      consoleSandbox(() => {
-        console.warn(rejectionWarning);
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        console.error(reason && reason.stack ? reason.stack : reason);
-      });
-    } else if (this._options.mode === 'strict') {
-      consoleSandbox(() => {
-        console.warn(rejectionWarning);
-      });
-      logAndExitProcess(reason);
-    }
-    /* eslint-enable no-console */
-  }
+  /* eslint-enable no-console */
 }

@@ -1,54 +1,58 @@
 const fs = require('fs');
 
-const SentryWebpackPlugin = require('@sentry/webpack-plugin');
+const { sentryWebpackPlugin } = require('@sentry/webpack-plugin');
 
-const sentryRelease = JSON.stringify(
-  // Always read first as Sentry takes this as precedence
-  process.env.SENTRY_RELEASE ||
-    // GitHub Actions - https://help.github.com/en/actions/configuring-and-managing-workflows/using-environment-variables#default-environment-variables
-    process.env.GITHUB_SHA ||
-    // Netlify - https://docs.netlify.com/configure-builds/environment-variables/#build-metadata
-    process.env.COMMIT_REF ||
-    // Vercel - https://vercel.com/docs/v2/build-step#system-environment-variables
-    process.env.VERCEL_GIT_COMMIT_SHA ||
-    // Zeit (now known as Vercel)
-    process.env.ZEIT_GITHUB_COMMIT_SHA ||
-    process.env.ZEIT_GITLAB_COMMIT_SHA ||
-    process.env.ZEIT_BITBUCKET_COMMIT_SHA ||
-    undefined,
-);
-
-const sentryDsn = JSON.stringify(process.env.SENTRY_DSN || '');
 const SENTRY_USER_CONFIG = ['./sentry.config.js', './sentry.config.ts'];
 
-exports.onCreateWebpackConfig = ({ plugins, getConfig, actions }) => {
-  actions.setWebpackConfig({
-    plugins: [
-      plugins.define({
-        __SENTRY_RELEASE__: sentryRelease,
-        __SENTRY_DSN__: sentryDsn,
-      }),
-    ],
-  });
+exports.onCreateWebpackConfig = ({ getConfig, actions }, options) => {
+  const enableClientWebpackPlugin = options.enableClientWebpackPlugin !== false;
+  if (process.env.NODE_ENV === 'production' && enableClientWebpackPlugin) {
+    const prevSourceMapSetting = getConfig() && 'devtool' in getConfig() ? getConfig().devtool : undefined;
+    const shouldAutomaticallyEnableSourceMaps =
+      prevSourceMapSetting !== 'source-map' && prevSourceMapSetting !== 'hidden-source-map';
 
-  if (process.env.NODE_ENV === 'production') {
+    if (shouldAutomaticallyEnableSourceMaps) {
+      // eslint-disable-next-line no-console
+      console.log(
+        '[Sentry] Automatically enabling source map generation by setting `devtool: "hidden-source-map"`. Those source maps will be deleted after they were uploaded to Sentry',
+      );
+    }
+
+    // Delete source maps per default or when this is explicitly set to `true` (`deleteSourceMapsAfterUpload: true` can override the default behavior)
+    const deleteSourcemapsAfterUpload =
+      options.deleteSourcemapsAfterUpload ||
+      (options.deleteSourcemapsAfterUpload !== false && shouldAutomaticallyEnableSourceMaps);
+
     actions.setWebpackConfig({
+      devtool: shouldAutomaticallyEnableSourceMaps ? 'hidden-source-map' : prevSourceMapSetting,
       plugins: [
-        new SentryWebpackPlugin({
-          // Only include files from the build output directory
-          include: 'public',
-          // Ignore files that aren't users' source code related
-          ignore: [
-            'app-*', // related to Gatsby itself
-            'polyfill-*', // related to polyfills
-            'framework-*', // related to the frameworks (e.g. React)
-            'webpack-runtime-*', // related to Webpack
-          ],
+        sentryWebpackPlugin({
+          sourcemaps: {
+            // Only include files from the build output directory
+            assets: ['./public/**'],
+            // Delete source files after uploading
+            filesToDeleteAfterUpload: deleteSourcemapsAfterUpload ? ['./public/**/*.map'] : undefined,
+            // Ignore files that aren't users' source code related
+            ignore: [
+              'polyfill-*', // related to polyfills
+              'framework-*', // related to the frameworks (e.g. React)
+              'webpack-runtime-*', // related to Webpack
+            ],
+          },
           // Handle sentry-cli configuration errors when the user has not done it not to break
           // the build.
           errorHandler(err, invokeErr) {
-            const { message } = err;
+            const message = (err.message && err.message.toLowerCase()) || '';
             if (message.includes('organization slug is required') || message.includes('project slug is required')) {
+              // eslint-disable-next-line no-console
+              console.log(
+                'Sentry [Info]: Not uploading source maps due to missing SENTRY_ORG and SENTRY_PROJECT env variables.',
+              );
+              return;
+            }
+            if (message.includes('authentication credentials were not provided')) {
+              // eslint-disable-next-line no-console
+              console.warn('Sentry [Warn]: Cannot upload source maps due to missing SENTRY_AUTH_TOKEN env variable.');
               return;
             }
             invokeErr(err);
@@ -94,7 +98,7 @@ function injectSentryConfig(config, configFile) {
     } else {
       // eslint-disable-next-line no-console
       console.error(
-        `Sentry Logger [Error]: Could not inject SDK initialization code into ${prop}, unexpected format: `,
+        `Sentry [Error]: Could not inject SDK initialization code into ${prop}, unexpected format: `,
         typeof value,
       );
     }

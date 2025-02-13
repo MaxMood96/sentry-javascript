@@ -1,116 +1,188 @@
-import { Transaction } from '@sentry/types';
-import { getGlobalObject } from '@sentry/utils';
-import hoistNonReactStatics from 'hoist-non-react-statics';
+import {
+  WINDOW,
+  browserTracingIntegration,
+  startBrowserTracingNavigationSpan,
+  startBrowserTracingPageLoadSpan,
+} from '@sentry/browser';
+import {
+  SEMANTIC_ATTRIBUTE_SENTRY_OP,
+  SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN,
+  SEMANTIC_ATTRIBUTE_SENTRY_SOURCE,
+  getActiveSpan,
+  getCurrentScope,
+  getRootSpan,
+  spanToJSON,
+} from '@sentry/core';
+import type { Client, Integration, Span, TransactionSource } from '@sentry/core';
 import * as React from 'react';
+import type { ReactElement } from 'react';
+import { hoistNonReactStatics } from './hoist-non-react-statics';
 
-import { Action, Location, ReactRouterInstrumentation } from './types';
+import type { Action, Location } from './types';
 
-// We need to disable eslint no-explict-any because any is required for the
+// We need to disable eslint no-explicit-any because any is required for the
 // react-router typings.
-/* eslint-disable @typescript-eslint/no-explicit-any */
-type Match = { path: string; url: string; params: Record<string, any>; isExact: boolean };
+type Match = { path: string; url: string; params: Record<string, any>; isExact: boolean }; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export type RouterHistory = {
   location?: Location;
   listen?(cb: (location: Location, action: Action) => void): void;
-} & Record<string, any>;
+} & Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export type RouteConfig = {
-  [propName: string]: any;
+  [propName: string]: unknown;
   path?: string | string[];
   exact?: boolean;
-  component?: JSX.Element;
+  component?: ReactElement;
   routes?: RouteConfig[];
 };
 
-type MatchPath = (pathname: string, props: string | string[] | any, parent?: Match | null) => Match | null;
-/* eslint-enable @typescript-eslint/no-explicit-any */
+export type MatchPath = (pathname: string, props: string | string[] | any, parent?: Match | null) => Match | null; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const global = getGlobalObject<Window>();
-
-let activeTransaction: Transaction | undefined;
-
-export function reactRouterV4Instrumentation(
-  history: RouterHistory,
-  routes?: RouteConfig[],
-  matchPath?: MatchPath,
-): ReactRouterInstrumentation {
-  return createReactRouterInstrumentation(history, 'react-router-v4', routes, matchPath);
+interface ReactRouterOptions {
+  history: RouterHistory;
+  routes?: RouteConfig[];
+  matchPath?: MatchPath;
 }
 
-export function reactRouterV5Instrumentation(
-  history: RouterHistory,
-  routes?: RouteConfig[],
-  matchPath?: MatchPath,
-): ReactRouterInstrumentation {
-  return createReactRouterInstrumentation(history, 'react-router-v5', routes, matchPath);
+/**
+ * A browser tracing integration that uses React Router v4 to instrument navigations.
+ * Expects `history` (and optionally `routes` and `matchPath`) to be passed as options.
+ */
+export function reactRouterV4BrowserTracingIntegration(
+  options: Parameters<typeof browserTracingIntegration>[0] & ReactRouterOptions,
+): Integration {
+  const integration = browserTracingIntegration({
+    ...options,
+    instrumentPageLoad: false,
+    instrumentNavigation: false,
+  });
+
+  const { history, routes, matchPath, instrumentPageLoad = true, instrumentNavigation = true } = options;
+
+  return {
+    ...integration,
+    afterAllSetup(client) {
+      integration.afterAllSetup(client);
+
+      instrumentReactRouter(
+        client,
+        instrumentPageLoad,
+        instrumentNavigation,
+        history,
+        'reactrouter_v4',
+        routes,
+        matchPath,
+      );
+    },
+  };
 }
 
-function createReactRouterInstrumentation(
+/**
+ * A browser tracing integration that uses React Router v5 to instrument navigations.
+ * Expects `history` (and optionally `routes` and `matchPath`) to be passed as options.
+ */
+export function reactRouterV5BrowserTracingIntegration(
+  options: Parameters<typeof browserTracingIntegration>[0] & ReactRouterOptions,
+): Integration {
+  const integration = browserTracingIntegration({
+    ...options,
+    instrumentPageLoad: false,
+    instrumentNavigation: false,
+  });
+
+  const { history, routes, matchPath, instrumentPageLoad = true, instrumentNavigation = true } = options;
+
+  return {
+    ...integration,
+    afterAllSetup(client) {
+      integration.afterAllSetup(client);
+
+      instrumentReactRouter(
+        client,
+        instrumentPageLoad,
+        instrumentNavigation,
+        history,
+        'reactrouter_v5',
+        routes,
+        matchPath,
+      );
+    },
+  };
+}
+
+function instrumentReactRouter(
+  client: Client,
+  instrumentPageLoad: boolean,
+  instrumentNavigation: boolean,
   history: RouterHistory,
-  name: string,
+  instrumentationName: string,
   allRoutes: RouteConfig[] = [],
   matchPath?: MatchPath,
-): ReactRouterInstrumentation {
+): void {
   function getInitPathName(): string | undefined {
-    if (history && history.location) {
+    if (history.location) {
       return history.location.pathname;
     }
 
-    if (global && global.location) {
-      return global.location.pathname;
+    if (WINDOW.location) {
+      return WINDOW.location.pathname;
     }
 
     return undefined;
   }
 
-  function getTransactionName(pathname: string): string {
+  /**
+   * Normalizes a transaction name. Returns the new name as well as the
+   * source of the transaction.
+   *
+   * @param pathname The initial pathname we normalize
+   */
+  function normalizeTransactionName(pathname: string): [string, TransactionSource] {
     if (allRoutes.length === 0 || !matchPath) {
-      return pathname;
+      return [pathname, 'url'];
     }
 
     const branches = matchRoutes(allRoutes, pathname, matchPath);
-    // eslint-disable-next-line @typescript-eslint/prefer-for-of
-    for (let x = 0; x < branches.length; x++) {
-      if (branches[x].match.isExact) {
-        return branches[x].match.path;
+    for (const branch of branches) {
+      if (branch.match.isExact) {
+        return [branch.match.path, 'route'];
       }
     }
 
-    return pathname;
+    return [pathname, 'url'];
   }
 
-  return (customStartTransaction, startTransactionOnPageLoad = true, startTransactionOnLocationChange = true): void => {
+  if (instrumentPageLoad) {
     const initPathName = getInitPathName();
-    if (startTransactionOnPageLoad && initPathName) {
-      activeTransaction = customStartTransaction({
-        name: getTransactionName(initPathName),
-        op: 'pageload',
-        tags: {
-          'routing.instrumentation': name,
+    if (initPathName) {
+      const [name, source] = normalizeTransactionName(initPathName);
+      startBrowserTracingPageLoadSpan(client, {
+        name,
+        attributes: {
+          [SEMANTIC_ATTRIBUTE_SENTRY_OP]: 'pageload',
+          [SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN]: `auto.pageload.react.${instrumentationName}`,
+          [SEMANTIC_ATTRIBUTE_SENTRY_SOURCE]: source,
         },
       });
     }
+  }
 
-    if (startTransactionOnLocationChange && history.listen) {
-      history.listen((location, action) => {
-        if (action && (action === 'PUSH' || action === 'POP')) {
-          if (activeTransaction) {
-            activeTransaction.finish();
-          }
-          const tags = {
-            'routing.instrumentation': name,
-          };
-
-          activeTransaction = customStartTransaction({
-            name: getTransactionName(location.pathname),
-            op: 'navigation',
-            tags,
-          });
-        }
-      });
-    }
-  };
+  if (instrumentNavigation && history.listen) {
+    history.listen((location, action) => {
+      if (action && (action === 'PUSH' || action === 'POP')) {
+        const [name, source] = normalizeTransactionName(location.pathname);
+        startBrowserTracingNavigationSpan(client, {
+          name,
+          attributes: {
+            [SEMANTIC_ATTRIBUTE_SENTRY_OP]: 'navigation',
+            [SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN]: `auto.navigation.react.${instrumentationName}`,
+            [SEMANTIC_ATTRIBUTE_SENTRY_SOURCE]: source,
+          },
+        });
+      }
+    });
+  }
 }
 
 /**
@@ -127,8 +199,9 @@ function matchRoutes(
     const match = route.path
       ? matchPath(pathname, route)
       : branch.length
-      ? branch[branch.length - 1].match // use parent match
-      : computeRootMatch(pathname); // use default "root" match
+        ? // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          branch[branch.length - 1]!.match // use parent match
+        : computeRootMatch(pathname); // use default "root" match
 
     if (match) {
       branch.push({ route, match });
@@ -150,14 +223,22 @@ function computeRootMatch(pathname: string): Match {
 
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access */
 export function withSentryRouting<P extends Record<string, any>, R extends React.ComponentType<P>>(Route: R): R {
-  const componentDisplayName = (Route as any).displayName || (Route as any).name;
+  const componentDisplayName = Route.displayName || Route.name;
 
   const WrappedRoute: React.FC<P> = (props: P) => {
-    if (activeTransaction && props && props.computedMatch && props.computedMatch.isExact) {
-      activeTransaction.setName(props.computedMatch.path);
+    if (props?.computedMatch?.isExact) {
+      const route = props.computedMatch.path;
+      const activeRootSpan = getActiveRootSpan();
+
+      getCurrentScope().setTransactionName(route);
+
+      if (activeRootSpan) {
+        activeRootSpan.updateName(route);
+        activeRootSpan.setAttribute(SEMANTIC_ATTRIBUTE_SENTRY_SOURCE, 'route');
+      }
     }
 
-    // @ts-ignore Setting more specific React Component typing for `R` generic above
+    // @ts-expect-error Setting more specific React Component typing for `R` generic above
     // will break advanced type inference done by react router params:
     // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/13dc4235c069e25fe7ee16e11f529d909f9f3ff8/types/react-router/index.d.ts#L154-L164
     return <Route {...props} />;
@@ -165,9 +246,23 @@ export function withSentryRouting<P extends Record<string, any>, R extends React
 
   WrappedRoute.displayName = `sentryRoute(${componentDisplayName})`;
   hoistNonReactStatics(WrappedRoute, Route);
-  // @ts-ignore Setting more specific React Component typing for `R` generic above
+  // @ts-expect-error Setting more specific React Component typing for `R` generic above
   // will break advanced type inference done by react router params:
   // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/13dc4235c069e25fe7ee16e11f529d909f9f3ff8/types/react-router/index.d.ts#L154-L164
   return WrappedRoute;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access */
+
+function getActiveRootSpan(): Span | undefined {
+  const span = getActiveSpan();
+  const rootSpan = span && getRootSpan(span);
+
+  if (!rootSpan) {
+    return undefined;
+  }
+
+  const op = spanToJSON(rootSpan).op;
+
+  // Only use this root span if it is a pageload or navigation span
+  return op === 'navigation' || op === 'pageload' ? rootSpan : undefined;
+}

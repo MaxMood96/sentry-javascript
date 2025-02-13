@@ -1,7 +1,17 @@
-import { Primitive, Transaction, TransactionContext } from '@sentry/types';
-import { getGlobalObject } from '@sentry/utils';
+import {
+  WINDOW,
+  browserTracingIntegration,
+  startBrowserTracingNavigationSpan,
+  startBrowserTracingPageLoadSpan,
+} from '@sentry/browser';
+import {
+  SEMANTIC_ATTRIBUTE_SENTRY_OP,
+  SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN,
+  SEMANTIC_ATTRIBUTE_SENTRY_SOURCE,
+} from '@sentry/core';
+import type { Integration, TransactionSource } from '@sentry/core';
 
-import { Location, ReactRouterInstrumentation } from './types';
+import type { Location } from './types';
 
 // Many of the types below had to be mocked out to prevent typescript issues
 // these types are required for correct functionality.
@@ -19,66 +29,74 @@ export type Match = (
   cb: (error?: Error, _redirectLocation?: Location, renderProps?: { routes?: Route[] }) => void,
 ) => void;
 
-const global = getGlobalObject<Window>();
+type ReactRouterV3TransactionSource = Extract<TransactionSource, 'url' | 'route'>;
+
+interface ReactRouterOptions {
+  history: HistoryV3;
+  routes: Route[];
+  match: Match;
+}
 
 /**
- * Creates routing instrumentation for React Router v3
- * Works for React Router >= 3.2.0 and < 4.0.0
- *
- * @param history object from the `history` library
- * @param routes a list of all routes, should be
- * @param match `Router.match` utility
+ * A browser tracing integration that uses React Router v3 to instrument navigations.
+ * Expects `history` (and optionally `routes` and `matchPath`) to be passed as options.
  */
-export function reactRouterV3Instrumentation(
-  history: HistoryV3,
-  routes: Route[],
-  match: Match,
-): ReactRouterInstrumentation {
-  return (
-    startTransaction: (context: TransactionContext) => Transaction | undefined,
-    startTransactionOnPageLoad: boolean = true,
-    startTransactionOnLocationChange: boolean = true,
-  ) => {
-    let activeTransaction: Transaction | undefined;
-    let prevName: string | undefined;
+export function reactRouterV3BrowserTracingIntegration(
+  options: Parameters<typeof browserTracingIntegration>[0] & ReactRouterOptions,
+): Integration {
+  const integration = browserTracingIntegration({
+    ...options,
+    instrumentPageLoad: false,
+    instrumentNavigation: false,
+  });
 
-    // Have to use global.location because history.location might not be defined.
-    if (startTransactionOnPageLoad && global && global.location) {
-      normalizeTransactionName(routes, global.location as unknown as Location, match, (localName: string) => {
-        prevName = localName;
-        activeTransaction = startTransaction({
-          name: prevName,
-          op: 'pageload',
-          tags: {
-            'routing.instrumentation': 'react-router-v3',
-          },
-        });
-      });
-    }
+  const { history, routes, match, instrumentPageLoad = true, instrumentNavigation = true } = options;
 
-    if (startTransactionOnLocationChange && history.listen) {
-      history.listen(location => {
-        if (location.action === 'PUSH' || location.action === 'POP') {
-          if (activeTransaction) {
-            activeTransaction.finish();
-          }
-          const tags: Record<string, Primitive> = {
-            'routing.instrumentation': 'react-router-v3',
-          };
-          if (prevName) {
-            tags.from = prevName;
-          }
-          normalizeTransactionName(routes, location, match, (localName: string) => {
-            prevName = localName;
-            activeTransaction = startTransaction({
-              name: prevName,
-              op: 'navigation',
-              tags,
+  return {
+    ...integration,
+    afterAllSetup(client) {
+      integration.afterAllSetup(client);
+
+      if (instrumentPageLoad && WINDOW.location) {
+        normalizeTransactionName(
+          routes,
+          WINDOW.location as unknown as Location,
+          match,
+          (localName: string, source: ReactRouterV3TransactionSource = 'url') => {
+            startBrowserTracingPageLoadSpan(client, {
+              name: localName,
+              attributes: {
+                [SEMANTIC_ATTRIBUTE_SENTRY_OP]: 'pageload',
+                [SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN]: 'auto.pageload.react.reactrouter_v3',
+                [SEMANTIC_ATTRIBUTE_SENTRY_SOURCE]: source,
+              },
             });
-          });
-        }
-      });
-    }
+          },
+        );
+      }
+
+      if (instrumentNavigation && history.listen) {
+        history.listen(location => {
+          if (location.action === 'PUSH' || location.action === 'POP') {
+            normalizeTransactionName(
+              routes,
+              location,
+              match,
+              (localName: string, source: TransactionSource = 'url') => {
+                startBrowserTracingNavigationSpan(client, {
+                  name: localName,
+                  attributes: {
+                    [SEMANTIC_ATTRIBUTE_SENTRY_OP]: 'navigation',
+                    [SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN]: 'auto.navigation.react.reactrouter_v3',
+                    [SEMANTIC_ATTRIBUTE_SENTRY_SOURCE]: source,
+                  },
+                });
+              },
+            );
+          }
+        });
+      }
+    },
   };
 }
 
@@ -89,7 +107,7 @@ function normalizeTransactionName(
   appRoutes: Route[],
   location: Location,
   match: Match,
-  callback: (pathname: string) => void,
+  callback: (pathname: string, source?: ReactRouterV3TransactionSource) => void,
 ): void {
   let name = location.pathname;
   match(
@@ -108,7 +126,7 @@ function normalizeTransactionName(
       }
 
       name = routePath;
-      return callback(name);
+      return callback(name, 'route');
     },
   );
 }
@@ -125,8 +143,9 @@ function getRouteStringFromRoutes(routes: Route[]): string {
 
   let index = -1;
   for (let x = routesWithPaths.length - 1; x >= 0; x--) {
-    const route = routesWithPaths[x];
-    if (route.path && route.path.startsWith('/')) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const route = routesWithPaths[x]!;
+    if (route.path?.startsWith('/')) {
       index = x;
       break;
     }

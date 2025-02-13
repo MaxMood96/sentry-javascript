@@ -1,66 +1,69 @@
 {
   "name": "@sentry/wasm",
-  "version": "6.19.7",
+  "version": "9.1.0",
   "description": "Support for WASM.",
   "repository": "git://github.com/getsentry/sentry-javascript.git",
   "homepage": "https://github.com/getsentry/sentry-javascript/tree/master/packages/wasm",
   "author": "Sentry",
   "license": "MIT",
   "engines": {
-    "node": ">=6"
+    "node": ">=18"
   },
-  "main": "build/npm/dist/index.js",
+  "files": [
+    "/build/npm"
+  ],
+  "main": "build/npm/cjs/index.js",
   "module": "build/npm/esm/index.js",
   "types": "build/npm/types/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "import": {
+        "types": "./build/npm/types/index.d.ts",
+        "default": "./build/npm/esm/index.js"
+      },
+      "require": {
+        "types": "./build/npm/types/index.d.ts",
+        "default": "./build/npm/cjs/index.js"
+      }
+    }
+  },
+  "typesVersions": {
+    "<5.0": {
+      "build/npm/types/index.d.ts": [
+        "build/npm/types-ts3.8/index.d.ts"
+      ]
+    }
+  },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "@sentry/browser": "6.19.7",
-    "@sentry/types": "6.19.7",
-    "tslib": "^1.9.3"
-  },
-  "devDependencies": {
-    "@types/jest-environment-puppeteer": "^4.4.0",
-    "@types/puppeteer": "^5.4.0",
-    "cross-env": "^7.0.3",
-    "express": "^4.17.1",
-    "jest-puppeteer": "^4.4.0",
-    "puppeteer": "^5.5.0"
+    "@sentry/browser": "9.1.0",
+    "@sentry/core": "9.1.0"
   },
   "scripts": {
-    "build": "run-p build:cjs build:esm build:bundle build:types",
-    "build:bundle": "rollup --config",
-    "build:cjs": "tsc -p tsconfig.cjs.json",
-    "build:dev": "run-p build:cjs build:esm build:types",
-    "build:es5": "yarn build:cjs # *** backwards compatibility - remove in v7 ***",
-    "build:esm": "tsc -p tsconfig.esm.json",
-    "build:types": "tsc -p tsconfig.types.json",
-    "build:watch": "run-p build:cjs:watch build:esm:watch build:bundle:watch build:types:watch",
-    "build:bundle:watch": "rollup --config --watch",
-    "build:cjs:watch": "tsc -p tsconfig.cjs.json --watch",
-    "build:dev:watch": "run-p build:cjs:watch build:esm:watch build:types:watch",
-    "build:es5:watch": "yarn build:cjs:watch # *** backwards compatibility - remove in v7 ***",
-    "build:esm:watch": "tsc -p tsconfig.esm.json --watch",
+    "build": "run-p build:transpile build:bundle build:types",
+    "build:bundle": "rollup --config rollup.bundle.config.mjs",
+    "build:dev": "run-p build:transpile build:types",
+    "build:transpile": "rollup -c rollup.npm.config.mjs",
+    "build:types": "run-s build:types:core build:types:downlevel",
+    "build:types:core": "tsc -p tsconfig.types.json",
+    "build:types:downlevel": "yarn downlevel-dts build/npm/types build/npm/types-ts3.8 --to ts3.8",
+    "build:watch": "run-p build:transpile:watch build:bundle:watch build:types:watch",
+    "build:bundle:watch": "rollup --config rollup.bundle.config.mjs --watch",
+    "build:dev:watch": "run-p build:transpile:watch build:types:watch",
+    "build:transpile:watch": "rollup -c rollup.npm.config.mjs --watch",
     "build:types:watch": "tsc -p tsconfig.types.json --watch",
-    "build:npm": "ts-node ../../scripts/prepack.ts --bundles --skipBundleCopy && npm pack ./build/npm",
+    "build:tarball": "npm pack",
     "circularDepCheck": "madge --circular src/index.ts",
-    "clean": "rimraf dist esm build coverage *.js.map *.d.ts",
-    "fix": "run-s fix:eslint fix:prettier",
-    "fix:eslint": "eslint . --format stylish --fix",
-    "fix:prettier": "prettier --write \"{src,test,scripts}/**/*.ts\"",
-    "link:yarn": "yarn link",
-    "lint": "run-s lint:prettier lint:eslint",
-    "lint:eslint": "eslint . --cache --cache-location '../../eslintcache/' --format stylish",
-    "lint:prettier": "prettier --check \"{src,test,scripts}/**/*.ts\"",
-    "test": "node test/scripts/ensure-browser-bundle.js && cross-env PORT=1337 jest",
-    "test:watch": "jest --watch"
+    "clean": "rimraf build coverage sentry-wasm-*.tgz",
+    "fix": "eslint . --format stylish --fix",
+    "lint": "eslint . --format stylish",
+    "yalc:publish": "yalc publish --push --sig"
   },
   "volta": {
     "extends": "../../package.json"
-  },
-  "jest": {
-    "preset": "jest-puppeteer"
   },
   "sideEffects": false
 }

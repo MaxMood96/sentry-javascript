@@ -1,41 +1,51 @@
-/* eslint-disable deprecation/deprecation */
-import { makeDsn } from '@sentry/utils';
-
-import { API, getReportDialogEndpoint, getRequestHeaders } from '../../src/api';
+import { getEnvelopeEndpointWithUrlEncodedAuth, getReportDialogEndpoint } from '../../src/api';
+import type { DsnComponents, SdkInfo } from '../../src/types-hoist';
+import { makeDsn } from '../../src/utils-hoist/dsn';
 
 const ingestDsn = 'https://abc@xxxx.ingest.sentry.io:1234/subpath/123';
 const dsnPublic = 'https://abc@sentry.io:1234/subpath/123';
-const legacyDsn = 'https://abc:123@sentry.io:1234/subpath/123';
 const tunnel = 'https://hello.com/world';
+const sdkInfo = { name: 'sentry.javascript.browser', version: '12.31.12' };
+
+const dsnPublicComponents = makeDsn(dsnPublic)!;
 
 describe('API', () => {
-  test('getStoreEndpoint', () => {
-    expect(new API(dsnPublic).getStoreEndpointWithUrlEncodedAuth()).toEqual(
-      'https://sentry.io:1234/subpath/api/123/store/?sentry_key=abc&sentry_version=7',
+  describe('getEnvelopeEndpointWithUrlEncodedAuth', () => {
+    it.each([
+      [
+        "doesn't include `sentry_client` when called with only DSN",
+        dsnPublicComponents,
+        undefined,
+        undefined,
+        'https://sentry.io:1234/subpath/api/123/envelope/?sentry_version=7&sentry_key=abc',
+      ],
+      ['uses `tunnel` value when called with `tunnel` option', dsnPublicComponents, tunnel, undefined, tunnel],
+      [
+        'uses `tunnel` value when called with `tunnel` and `sdkInfo` options',
+        dsnPublicComponents,
+        tunnel,
+        sdkInfo,
+        tunnel,
+      ],
+      [
+        'includes `sentry_client` when called with `sdkInfo` in options and no tunnel',
+        dsnPublicComponents,
+        undefined,
+        sdkInfo,
+        'https://sentry.io:1234/subpath/api/123/envelope/?sentry_version=7&sentry_key=abc&sentry_client=sentry.javascript.browser%2F12.31.12',
+      ],
+    ])(
+      '%s',
+      (
+        _testName: string,
+        dsnComponents: DsnComponents,
+        tunnel: string | undefined,
+        sdkInfo: SdkInfo | undefined,
+        expected: string,
+      ) => {
+        expect(getEnvelopeEndpointWithUrlEncodedAuth(dsnComponents, tunnel, sdkInfo)).toBe(expected);
+      },
     );
-    expect(new API(dsnPublic).getStoreEndpoint()).toEqual('https://sentry.io:1234/subpath/api/123/store/');
-    expect(new API(ingestDsn).getStoreEndpoint()).toEqual('https://xxxx.ingest.sentry.io:1234/subpath/api/123/store/');
-  });
-
-  test('getEnvelopeEndpoint', () => {
-    expect(new API(dsnPublic).getEnvelopeEndpointWithUrlEncodedAuth()).toEqual(
-      'https://sentry.io:1234/subpath/api/123/envelope/?sentry_key=abc&sentry_version=7',
-    );
-    expect(new API(dsnPublic, {}, tunnel).getEnvelopeEndpointWithUrlEncodedAuth()).toEqual(tunnel);
-  });
-
-  test('getRequestHeaders', () => {
-    expect(getRequestHeaders(makeDsn(dsnPublic), 'a', '1.0')).toMatchObject({
-      'Content-Type': 'application/json',
-      'X-Sentry-Auth': expect.stringMatching(/^Sentry sentry_version=\d, sentry_client=a\/1\.0, sentry_key=abc$/),
-    });
-
-    expect(getRequestHeaders(makeDsn(legacyDsn), 'a', '1.0')).toMatchObject({
-      'Content-Type': 'application/json',
-      'X-Sentry-Auth': expect.stringMatching(
-        /^Sentry sentry_version=\d, sentry_client=a\/1\.0, sentry_key=abc, sentry_secret=123$/,
-      ),
-    });
   });
 
   describe('getReportDialogEndpoint', () => {
@@ -105,6 +115,12 @@ describe('API', () => {
         { user: undefined },
         'https://sentry.io:1234/subpath/api/embed/error-page/?dsn=https://abc@sentry.io:1234/subpath/123',
       ],
+      [
+        'with Public DSN and onClose callback',
+        dsnPublic,
+        { onClose: () => {} },
+        'https://sentry.io:1234/subpath/api/embed/error-page/?dsn=https://abc@sentry.io:1234/subpath/123',
+      ],
     ])(
       '%s',
       (
@@ -116,15 +132,5 @@ describe('API', () => {
         expect(getReportDialogEndpoint(dsn, options)).toBe(output);
       },
     );
-  });
-
-  test('getDsn', () => {
-    expect(new API(dsnPublic).getDsn().host).toEqual(makeDsn(dsnPublic).host);
-    expect(new API(dsnPublic).getDsn().path).toEqual(makeDsn(dsnPublic).path);
-    expect(new API(dsnPublic).getDsn().pass).toEqual(makeDsn(dsnPublic).pass);
-    expect(new API(dsnPublic).getDsn().port).toEqual(makeDsn(dsnPublic).port);
-    expect(new API(dsnPublic).getDsn().protocol).toEqual(makeDsn(dsnPublic).protocol);
-    expect(new API(dsnPublic).getDsn().projectId).toEqual(makeDsn(dsnPublic).projectId);
-    expect(new API(dsnPublic).getDsn().publicKey).toEqual(makeDsn(dsnPublic).publicKey);
   });
 });

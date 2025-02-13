@@ -1,38 +1,39 @@
-import { Event, EventHint, Exception, Severity, StackFrame } from '@sentry/types';
+import type {
+  Event,
+  EventHint,
+  Exception,
+  ParameterizedString,
+  SeverityLevel,
+  StackFrame,
+  StackParser,
+} from '@sentry/core';
 import {
   addExceptionMechanism,
   addExceptionTypeValue,
-  createStackParser,
   extractExceptionKeysForMessage,
+  getClient,
   isDOMError,
   isDOMException,
   isError,
   isErrorEvent,
   isEvent,
+  isParameterizedString,
   isPlainObject,
   normalizeToSize,
   resolvedSyncPromise,
-} from '@sentry/utils';
+} from '@sentry/core';
 
-import {
-  chromeStackParser,
-  geckoStackParser,
-  opera10StackParser,
-  opera11StackParser,
-  winjsStackParser,
-} from './stack-parsers';
+type Prototype = { constructor: (...args: unknown[]) => unknown };
 
 /**
- * This function creates an exception from an TraceKitStackTrace
- * @param stacktrace TraceKitStackTrace that will be converted to an exception
- * @hidden
+ * This function creates an exception from a JavaScript Error
  */
-export function exceptionFromError(ex: Error): Exception {
+export function exceptionFromError(stackParser: StackParser, ex: Error): Exception {
   // Get the frames first since Opera can lose the stack if we touch anything else first
-  const frames = parseStackFrames(ex);
+  const frames = parseStackFrames(stackParser, ex);
 
   const exception: Exception = {
-    type: ex && ex.name,
+    type: extractType(ex),
     value: extractMessage(ex),
   };
 
@@ -47,68 +48,78 @@ export function exceptionFromError(ex: Error): Exception {
   return exception;
 }
 
-/**
- * @hidden
- */
-export function eventFromPlainObject(
+function eventFromPlainObject(
+  stackParser: StackParser,
   exception: Record<string, unknown>,
   syntheticException?: Error,
   isUnhandledRejection?: boolean,
 ): Event {
-  const event: Event = {
+  const client = getClient();
+  const normalizeDepth = client?.getOptions().normalizeDepth;
+
+  // If we can, we extract an exception from the object properties
+  const errorFromProp = getErrorPropertyFromObject(exception);
+
+  const extra = {
+    __serialized__: normalizeToSize(exception, normalizeDepth),
+  };
+
+  if (errorFromProp) {
+    return {
+      exception: {
+        values: [exceptionFromError(stackParser, errorFromProp)],
+      },
+      extra,
+    };
+  }
+
+  const event = {
     exception: {
       values: [
         {
           type: isEvent(exception) ? exception.constructor.name : isUnhandledRejection ? 'UnhandledRejection' : 'Error',
-          value: `Non-Error ${
-            isUnhandledRejection ? 'promise rejection' : 'exception'
-          } captured with keys: ${extractExceptionKeysForMessage(exception)}`,
-        },
+          value: getNonErrorObjectExceptionValue(exception, { isUnhandledRejection }),
+        } as Exception,
       ],
     },
-    extra: {
-      __serialized__: normalizeToSize(exception),
-    },
-  };
+    extra,
+  } satisfies Event;
 
   if (syntheticException) {
-    const frames = parseStackFrames(syntheticException);
+    const frames = parseStackFrames(stackParser, syntheticException);
     if (frames.length) {
-      event.stacktrace = { frames };
+      // event.exception.values[0] has been set above
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      event.exception.values[0]!.stacktrace = { frames };
     }
   }
 
   return event;
 }
 
-/**
- * @hidden
- */
-export function eventFromError(ex: Error): Event {
+function eventFromError(stackParser: StackParser, ex: Error): Event {
   return {
     exception: {
-      values: [exceptionFromError(ex)],
+      values: [exceptionFromError(stackParser, ex)],
     },
   };
 }
 
 /** Parses stack frames from an error */
-export function parseStackFrames(ex: Error & { framesToPop?: number; stacktrace?: string }): StackFrame[] {
+function parseStackFrames(
+  stackParser: StackParser,
+  ex: Error & { framesToPop?: number; stacktrace?: string },
+): StackFrame[] {
   // Access and store the stacktrace property before doing ANYTHING
   // else to it because Opera is not very good at providing it
   // reliably in other circumstances.
   const stacktrace = ex.stacktrace || ex.stack || '';
 
-  const popSize = getPopSize(ex);
+  const skipLines = getSkipFirstStackStringLines(ex);
+  const framesToPop = getPopFirstTopFrames(ex);
 
   try {
-    return createStackParser(
-      opera10StackParser,
-      opera11StackParser,
-      chromeStackParser,
-      winjsStackParser,
-      geckoStackParser,
-    )(stacktrace, popSize);
+    return stackParser(stacktrace, skipLines, framesToPop);
   } catch (e) {
     // no-empty
   }
@@ -119,18 +130,65 @@ export function parseStackFrames(ex: Error & { framesToPop?: number; stacktrace?
 // Based on our own mapping pattern - https://github.com/getsentry/sentry/blob/9f08305e09866c8bd6d0c24f5b0aabdd7dd6c59c/src/sentry/lang/javascript/errormapping.py#L83-L108
 const reactMinifiedRegexp = /Minified React error #\d+;/i;
 
-function getPopSize(ex: Error & { framesToPop?: number }): number {
-  if (ex) {
-    if (typeof ex.framesToPop === 'number') {
-      return ex.framesToPop;
-    }
-
-    if (reactMinifiedRegexp.test(ex.message)) {
-      return 1;
-    }
+/**
+ * Certain known React errors contain links that would be falsely
+ * parsed as frames. This function check for these errors and
+ * returns number of the stack string lines to skip.
+ */
+function getSkipFirstStackStringLines(ex: Error): number {
+  if (ex && reactMinifiedRegexp.test(ex.message)) {
+    return 1;
   }
 
   return 0;
+}
+
+/**
+ * If error has `framesToPop` property, it means that the
+ * creator tells us the first x frames will be useless
+ * and should be discarded. Typically error from wrapper function
+ * which don't point to the actual location in the developer's code.
+ *
+ * Example: https://github.com/zertosh/invariant/blob/master/invariant.js#L46
+ */
+function getPopFirstTopFrames(ex: Error & { framesToPop?: unknown }): number {
+  if (typeof ex.framesToPop === 'number') {
+    return ex.framesToPop;
+  }
+
+  return 0;
+}
+
+// https://developer.mozilla.org/en-US/docs/WebAssembly/JavaScript_interface/Exception
+// @ts-expect-error - WebAssembly.Exception is a valid class
+function isWebAssemblyException(exception: unknown): exception is WebAssembly.Exception {
+  // Check for support
+  // @ts-expect-error - WebAssembly.Exception is a valid class
+  if (typeof WebAssembly !== 'undefined' && typeof WebAssembly.Exception !== 'undefined') {
+    // @ts-expect-error - WebAssembly.Exception is a valid class
+    return exception instanceof WebAssembly.Exception;
+  } else {
+    return false;
+  }
+}
+
+/**
+ * Extracts from errors what we use as the exception `type` in error events.
+ *
+ * Usually, this is the `name` property on Error objects but WASM errors need to be treated differently.
+ */
+export function extractType(ex: Error & { message: { error?: Error } }): string | undefined {
+  const name = ex?.name;
+
+  // The name for WebAssembly.Exception Errors needs to be extracted differently.
+  // Context: https://github.com/getsentry/sentry-javascript/issues/13787
+  if (!name && isWebAssemblyException(ex)) {
+    // Emscripten sets array[type, message] to the "message" property on the WebAssembly.Exception object
+    const hasTypeInMessage = ex.message && Array.isArray(ex.message) && ex.message.length == 2;
+    return hasTypeInMessage ? ex.message[0] : 'WebAssembly.Exception';
+  }
+
+  return name;
 }
 
 /**
@@ -138,14 +196,25 @@ function getPopSize(ex: Error & { framesToPop?: number }): number {
  * https://github.com/getsentry/sentry-javascript/issues/1949
  * In this specific case we try to extract stacktrace.message.error.message
  */
-function extractMessage(ex: Error & { message: { error?: Error } }): string {
-  const message = ex && ex.message;
+export function extractMessage(ex: Error & { message: { error?: Error } }): string {
+  const message = ex?.message;
+
+  if (isWebAssemblyException(ex)) {
+    // For Node 18, Emscripten sets array[type, message] to the "message" property on the WebAssembly.Exception object
+    if (Array.isArray(ex.message) && ex.message.length == 2) {
+      return ex.message[1];
+    }
+    return 'wasm exception';
+  }
+
   if (!message) {
     return 'No error message';
   }
+
   if (message.error && typeof message.error.message === 'string') {
     return message.error.message;
   }
+
   return message;
 }
 
@@ -154,15 +223,16 @@ function extractMessage(ex: Error & { message: { error?: Error } }): string {
  * @hidden
  */
 export function eventFromException(
+  stackParser: StackParser,
   exception: unknown,
   hint?: EventHint,
   attachStacktrace?: boolean,
 ): PromiseLike<Event> {
-  const syntheticException = (hint && hint.syntheticException) || undefined;
-  const event = eventFromUnknownInput(exception, syntheticException, attachStacktrace);
+  const syntheticException = hint?.syntheticException || undefined;
+  const event = eventFromUnknownInput(stackParser, exception, syntheticException, attachStacktrace);
   addExceptionMechanism(event); // defaults to { type: 'generic', handled: true }
-  event.level = Severity.Error;
-  if (hint && hint.event_id) {
+  event.level = 'error';
+  if (hint?.event_id) {
     event.event_id = hint.event_id;
   }
   return resolvedSyncPromise(event);
@@ -173,15 +243,16 @@ export function eventFromException(
  * @hidden
  */
 export function eventFromMessage(
-  message: string,
-  level: Severity = Severity.Info,
+  stackParser: StackParser,
+  message: ParameterizedString,
+  level: SeverityLevel = 'info',
   hint?: EventHint,
   attachStacktrace?: boolean,
 ): PromiseLike<Event> {
-  const syntheticException = (hint && hint.syntheticException) || undefined;
-  const event = eventFromString(message, syntheticException, attachStacktrace);
+  const syntheticException = hint?.syntheticException || undefined;
+  const event = eventFromString(stackParser, message, syntheticException, attachStacktrace);
   event.level = level;
-  if (hint && hint.event_id) {
+  if (hint?.event_id) {
     event.event_id = hint.event_id;
   }
   return resolvedSyncPromise(event);
@@ -191,6 +262,7 @@ export function eventFromMessage(
  * @hidden
  */
 export function eventFromUnknownInput(
+  stackParser: StackParser,
   exception: unknown,
   syntheticException?: Error,
   attachStacktrace?: boolean,
@@ -201,7 +273,7 @@ export function eventFromUnknownInput(
   if (isErrorEvent(exception as ErrorEvent) && (exception as ErrorEvent).error) {
     // If it is an ErrorEvent with `error` property, extract it to get actual Error
     const errorEvent = exception as ErrorEvent;
-    return eventFromError(errorEvent.error as Error);
+    return eventFromError(stackParser, errorEvent.error as Error);
   }
 
   // If it is a `DOMError` (which is a legacy API, but still supported in some browsers) then we just extract the name
@@ -211,18 +283,19 @@ export function eventFromUnknownInput(
   // https://developer.mozilla.org/en-US/docs/Web/API/DOMError
   // https://developer.mozilla.org/en-US/docs/Web/API/DOMException
   // https://webidl.spec.whatwg.org/#es-DOMException-specialness
-  if (isDOMError(exception as DOMError) || isDOMException(exception as DOMException)) {
+  if (isDOMError(exception) || isDOMException(exception as DOMException)) {
     const domException = exception as DOMException;
 
     if ('stack' in (exception as Error)) {
-      event = eventFromError(exception as Error);
+      event = eventFromError(stackParser, exception as Error);
     } else {
       const name = domException.name || (isDOMError(domException) ? 'DOMError' : 'DOMException');
       const message = domException.message ? `${name}: ${domException.message}` : name;
-      event = eventFromString(message, syntheticException, attachStacktrace);
+      event = eventFromString(stackParser, message, syntheticException, attachStacktrace);
       addExceptionTypeValue(event, message);
     }
     if ('code' in domException) {
+      // eslint-disable-next-line deprecation/deprecation
       event.tags = { ...event.tags, 'DOMException.code': `${domException.code}` };
     }
 
@@ -230,14 +303,14 @@ export function eventFromUnknownInput(
   }
   if (isError(exception)) {
     // we have a real Error object, do nothing
-    return eventFromError(exception);
+    return eventFromError(stackParser, exception);
   }
   if (isPlainObject(exception) || isEvent(exception)) {
     // If it's a plain object or an instance of `Event` (the built-in JS kind, not this SDK's `Event` type), serialize
     // it manually. This will allow us to group events based on top-level keys which is much better than creating a new
     // group on any key/value change.
     const objectException = exception as Record<string, unknown>;
-    event = eventFromPlainObject(objectException, syntheticException, isUnhandledRejection);
+    event = eventFromPlainObject(stackParser, objectException, syntheticException, isUnhandledRejection);
     addExceptionMechanism(event, {
       synthetic: true,
     });
@@ -253,7 +326,7 @@ export function eventFromUnknownInput(
   // - a plain Object
   //
   // So bail out and capture it as a simple message:
-  event = eventFromString(exception as string, syntheticException, attachStacktrace);
+  event = eventFromString(stackParser, exception as string, syntheticException, attachStacktrace);
   addExceptionTypeValue(event, `${exception}`, undefined);
   addExceptionMechanism(event, {
     synthetic: true,
@@ -262,20 +335,78 @@ export function eventFromUnknownInput(
   return event;
 }
 
-/**
- * @hidden
- */
-export function eventFromString(input: string, syntheticException?: Error, attachStacktrace?: boolean): Event {
-  const event: Event = {
-    message: input,
-  };
+function eventFromString(
+  stackParser: StackParser,
+  message: ParameterizedString,
+  syntheticException?: Error,
+  attachStacktrace?: boolean,
+): Event {
+  const event: Event = {};
 
   if (attachStacktrace && syntheticException) {
-    const frames = parseStackFrames(syntheticException);
+    const frames = parseStackFrames(stackParser, syntheticException);
     if (frames.length) {
-      event.stacktrace = { frames };
+      event.exception = {
+        values: [{ value: message, stacktrace: { frames } }],
+      };
+    }
+    addExceptionMechanism(event, { synthetic: true });
+  }
+
+  if (isParameterizedString(message)) {
+    const { __sentry_template_string__, __sentry_template_values__ } = message;
+
+    event.logentry = {
+      message: __sentry_template_string__,
+      params: __sentry_template_values__,
+    };
+    return event;
+  }
+
+  event.message = message;
+  return event;
+}
+
+function getNonErrorObjectExceptionValue(
+  exception: Record<string, unknown>,
+  { isUnhandledRejection }: { isUnhandledRejection?: boolean },
+): string {
+  const keys = extractExceptionKeysForMessage(exception);
+  const captureType = isUnhandledRejection ? 'promise rejection' : 'exception';
+
+  // Some ErrorEvent instances do not have an `error` property, which is why they are not handled before
+  // We still want to try to get a decent message for these cases
+  if (isErrorEvent(exception)) {
+    return `Event \`ErrorEvent\` captured as ${captureType} with message \`${exception.message}\``;
+  }
+
+  if (isEvent(exception)) {
+    const className = getObjectClassName(exception);
+    return `Event \`${className}\` (type=${exception.type}) captured as ${captureType}`;
+  }
+
+  return `Object captured as ${captureType} with keys: ${keys}`;
+}
+
+function getObjectClassName(obj: unknown): string | undefined | void {
+  try {
+    const prototype: Prototype | null = Object.getPrototypeOf(obj);
+    return prototype ? prototype.constructor.name : undefined;
+  } catch (e) {
+    // ignore errors here
+  }
+}
+
+/** If a plain object has a property that is an `Error`, return this error. */
+function getErrorPropertyFromObject(obj: Record<string, unknown>): Error | undefined {
+  for (const prop in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, prop)) {
+      const value = obj[prop];
+      if (value instanceof Error) {
+        return value;
+      }
     }
   }
 
-  return event;
+  return undefined;
 }

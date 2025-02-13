@@ -1,6 +1,6 @@
-import { getCurrentHub } from '@sentry/hub';
-import { configureScope } from '@sentry/minimal';
-import { Event, Integration } from '@sentry/types';
+import type { Client } from '../../src';
+import { getClient, getCurrentScope } from '../../src';
+import type { Event, EventProcessor, Integration } from '../../src/types-hoist';
 
 export class TestIntegration implements Integration {
   public static id: string = 'TestIntegration';
@@ -8,14 +8,39 @@ export class TestIntegration implements Integration {
   public name: string = 'TestIntegration';
 
   public setupOnce(): void {
-    configureScope(scope => {
-      scope.addEventProcessor((event: Event) => {
-        if (!getCurrentHub().getIntegration(TestIntegration)) {
-          return event;
-        }
+    const eventProcessor: EventProcessor = (event: Event) => {
+      if (!getClient()?.getIntegrationByName('TestIntegration')) {
+        return event;
+      }
 
-        return null;
-      });
+      return null;
+    };
+
+    eventProcessor.id = this.name;
+
+    getCurrentScope().addEventProcessor(eventProcessor);
+  }
+}
+
+export class AddAttachmentTestIntegration implements Integration {
+  public static id: string = 'AddAttachmentTestIntegration';
+
+  public name: string = 'AddAttachmentTestIntegration';
+
+  public setup(client: Client): void {
+    client.addEventProcessor((event, hint) => {
+      hint.attachments = [...(hint.attachments || []), { filename: 'integration.file', data: 'great content!' }];
+      return event;
     });
+  }
+}
+
+export class AdHocIntegration implements Integration {
+  public static id: string = 'AdHockIntegration';
+
+  public name: string = 'AdHockIntegration';
+
+  public setupOnce(): void {
+    // Noop
   }
 }

@@ -1,72 +1,150 @@
-export {
-  Breadcrumb,
-  BreadcrumbHint,
-  Request,
-  SdkInfo,
-  Event,
-  EventHint,
-  EventStatus,
-  Exception,
-  Response,
-  Severity,
-  StackFrame,
-  Stacktrace,
-  Thread,
-  User,
-} from '@sentry/types';
+export { httpIntegration } from './integrations/http';
+export { nativeNodeFetchIntegration } from './integrations/node-fetch';
+export { fsIntegration } from './integrations/fs';
 
-export { SeverityLevel } from '@sentry/utils';
+export { consoleIntegration } from './integrations/console';
+export { nodeContextIntegration } from './integrations/context';
+export { contextLinesIntegration } from './integrations/contextlines';
+export { localVariablesIntegration } from './integrations/local-variables';
+export { modulesIntegration } from './integrations/modules';
+export { onUncaughtExceptionIntegration } from './integrations/onuncaughtexception';
+export { onUnhandledRejectionIntegration } from './integrations/onunhandledrejection';
+export { anrIntegration, disableAnrDetectionForCallback } from './integrations/anr';
+
+export { expressIntegration, expressErrorHandler, setupExpressErrorHandler } from './integrations/tracing/express';
+export { fastifyIntegration, setupFastifyErrorHandler } from './integrations/tracing/fastify';
+export { graphqlIntegration } from './integrations/tracing/graphql';
+export { kafkaIntegration } from './integrations/tracing/kafka';
+export { lruMemoizerIntegration } from './integrations/tracing/lrumemoizer';
+export { mongoIntegration } from './integrations/tracing/mongo';
+export { mongooseIntegration } from './integrations/tracing/mongoose';
+export { mysqlIntegration } from './integrations/tracing/mysql';
+export { mysql2Integration } from './integrations/tracing/mysql2';
+export { redisIntegration } from './integrations/tracing/redis';
+export { postgresIntegration } from './integrations/tracing/postgres';
+export { prismaIntegration } from './integrations/tracing/prisma';
+export { hapiIntegration, setupHapiErrorHandler } from './integrations/tracing/hapi';
+export { koaIntegration, setupKoaErrorHandler } from './integrations/tracing/koa';
+export { connectIntegration, setupConnectErrorHandler } from './integrations/tracing/connect';
+export { spotlightIntegration } from './integrations/spotlight';
+export { knexIntegration } from './integrations/tracing/knex';
+export { tediousIntegration } from './integrations/tracing/tedious';
+export { genericPoolIntegration } from './integrations/tracing/genericPool';
+export { dataloaderIntegration } from './integrations/tracing/dataloader';
+export { amqplibIntegration } from './integrations/tracing/amqplib';
+export { vercelAIIntegration } from './integrations/tracing/vercelai';
+export { childProcessIntegration } from './integrations/childProcess';
+
+export { SentryContextManager } from './otel/contextManager';
+export { generateInstrumentOnce } from './otel/instrument';
 
 export {
-  addGlobalEventProcessor,
+  init,
+  getDefaultIntegrations,
+  getDefaultIntegrationsWithoutPerformance,
+  initWithoutDefaultIntegrations,
+  validateOpenTelemetrySetup,
+} from './sdk';
+export { initOpenTelemetry, preloadOpenTelemetry } from './sdk/initOtel';
+export { getAutoPerformanceIntegrations } from './integrations/tracing';
+export { getSentryRelease, defaultStackParser } from './sdk/api';
+export { createGetModuleFromFilename } from './utils/module';
+export { makeNodeTransport } from './transports';
+export { NodeClient } from './sdk/client';
+export { cron } from './cron';
+
+export type { NodeOptions } from './types';
+
+export {
+  // This needs exporting so the NodeClient can be used without calling init
+  setOpenTelemetryContextAsyncContextStrategy as setNodeAsyncContextStrategy,
+} from '@sentry/opentelemetry';
+
+export {
   addBreadcrumb,
-  captureException,
-  captureEvent,
-  captureMessage,
-  configureScope,
-  getHubFromCarrier,
-  getCurrentHub,
-  Hub,
-  makeMain,
-  Scope,
-  Session,
-  startTransaction,
+  isInitialized,
+  getGlobalScope,
+  lastEventId,
+  close,
+  createTransport,
+  flush,
   SDK_VERSION,
+  getSpanStatusFromHttpCode,
+  setHttpStatus,
+  captureCheckIn,
+  withMonitor,
+  requestDataIntegration,
+  functionToStringIntegration,
+  inboundFiltersIntegration,
+  linkedErrorsIntegration,
+  addEventProcessor,
   setContext,
   setExtra,
   setExtras,
   setTag,
   setTags,
   setUser,
+  SEMANTIC_ATTRIBUTE_SENTRY_OP,
+  SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN,
+  SEMANTIC_ATTRIBUTE_SENTRY_SOURCE,
+  SEMANTIC_ATTRIBUTE_SENTRY_SAMPLE_RATE,
+  setCurrentClient,
+  Scope,
+  setMeasurement,
+  getSpanDescendants,
+  parameterize,
+  getClient,
+  getCurrentScope,
+  getIsolationScope,
+  getTraceData,
+  getTraceMetaTags,
+  continueTrace,
   withScope,
+  withIsolationScope,
+  captureException,
+  captureEvent,
+  captureMessage,
+  captureFeedback,
+  captureConsoleIntegration,
+  dedupeIntegration,
+  extraErrorDataIntegration,
+  rewriteFramesIntegration,
+  startSession,
+  captureSession,
+  endSession,
+  addIntegration,
+  startSpan,
+  startSpanManual,
+  startInactiveSpan,
+  startNewTrace,
+  suppressTracing,
+  getActiveSpan,
+  withActiveSpan,
+  getRootSpan,
+  spanToJSON,
+  spanToTraceHeader,
+  spanToBaggageHeader,
+  trpcMiddleware,
+  updateSpanName,
+  zodErrorsIntegration,
+  profiler,
 } from '@sentry/core';
 
-export { NodeOptions } from './types';
-export { NodeBackend } from './backend';
-export { NodeClient } from './client';
-export { defaultIntegrations, init, lastEventId, flush, close, getSentryRelease } from './sdk';
-export { deepReadDirSync } from './utils';
-export { SDK_NAME } from './version';
-
-import { Integrations as CoreIntegrations } from '@sentry/core';
-import { getMainCarrier } from '@sentry/hub';
-import * as domain from 'domain';
-
-import * as Handlers from './handlers';
-import * as NodeIntegrations from './integrations';
-import * as Transports from './transports';
-
-const INTEGRATIONS = {
-  ...CoreIntegrations,
-  ...NodeIntegrations,
-};
-
-export { INTEGRATIONS as Integrations, Transports, Handlers };
-
-// We need to patch domain on the global __SENTRY__ object to make it work for node in cross-platform packages like
-// @sentry/hub. If we don't do this, browser bundlers will have troubles resolving `require('domain')`.
-const carrier = getMainCarrier();
-if (carrier.__SENTRY__) {
-  carrier.__SENTRY__.extensions = carrier.__SENTRY__.extensions || {};
-  carrier.__SENTRY__.extensions.domain = carrier.__SENTRY__.extensions.domain || domain;
-}
+export type {
+  Breadcrumb,
+  BreadcrumbHint,
+  PolymorphicRequest,
+  RequestEventData,
+  SdkInfo,
+  Event,
+  EventHint,
+  ErrorEvent,
+  Exception,
+  Session,
+  SeverityLevel,
+  StackFrame,
+  Stacktrace,
+  Thread,
+  User,
+  Span,
+} from '@sentry/core';

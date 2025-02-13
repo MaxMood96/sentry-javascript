@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { configureScope } from '@sentry/minimal';
-import { Scope } from '@sentry/types';
+import type { Scope } from '@sentry/core';
+import { addBreadcrumb, addNonEnumerableProperty, getClient, getCurrentScope, getGlobalScope } from '@sentry/core';
 
 interface Action<T = any> {
   type: T;
@@ -49,6 +49,12 @@ type StoreEnhancerStoreCreator<Ext = Record<string, unknown>, StateExt = never> 
 
 export interface SentryEnhancerOptions<S = any> {
   /**
+   * Redux state in attachments or not.
+   * @default true
+   */
+  attachReduxState?: boolean;
+
+  /**
    * Transforms the state before attaching it to an event.
    * Use this to remove any private data before sending it to Sentry.
    * Return null to not attach the state.
@@ -68,9 +74,9 @@ export interface SentryEnhancerOptions<S = any> {
 
 const ACTION_BREADCRUMB_CATEGORY = 'redux.action';
 const ACTION_BREADCRUMB_TYPE = 'info';
-const STATE_CONTEXT_KEY = 'redux.state';
 
 const defaultOptions: SentryEnhancerOptions = {
+  attachReduxState: true,
   actionTransformer: action => action,
   stateTransformer: state => state || null,
 };
@@ -89,35 +95,64 @@ function createReduxEnhancer(enhancerOptions?: Partial<SentryEnhancerOptions>): 
 
   return (next: StoreEnhancerStoreCreator): StoreEnhancerStoreCreator =>
     <S = any, A extends Action = AnyAction>(reducer: Reducer<S, A>, initialState?: PreloadedState<S>) => {
+      options.attachReduxState &&
+        getGlobalScope().addEventProcessor((event, hint) => {
+          try {
+            // @ts-expect-error try catch to reduce bundle size
+            if (event.type === undefined && event.contexts.state.state.type === 'redux') {
+              hint.attachments = [
+                ...(hint.attachments || []),
+                // @ts-expect-error try catch to reduce bundle size
+                { filename: 'redux_state.json', data: JSON.stringify(event.contexts.state.state.value) },
+              ];
+            }
+          } catch (_) {
+            // empty
+          }
+          return event;
+        });
+
       const sentryReducer: Reducer<S, A> = (state, action): S => {
         const newState = reducer(state, action);
 
-        configureScope(scope => {
-          /* Action breadcrumbs */
-          const transformedAction = options.actionTransformer(action);
-          if (typeof transformedAction !== 'undefined' && transformedAction !== null) {
-            scope.addBreadcrumb({
-              category: ACTION_BREADCRUMB_CATEGORY,
-              data: transformedAction,
-              type: ACTION_BREADCRUMB_TYPE,
-            });
-          }
+        const scope = getCurrentScope();
 
-          /* Set latest state to scope */
-          const transformedState = options.stateTransformer(newState);
-          if (typeof transformedState !== 'undefined' && transformedState !== null) {
-            scope.setContext(STATE_CONTEXT_KEY, transformedState);
-          } else {
-            scope.setContext(STATE_CONTEXT_KEY, null);
-          }
+        /* Action breadcrumbs */
+        const transformedAction = options.actionTransformer(action);
+        if (typeof transformedAction !== 'undefined' && transformedAction !== null) {
+          addBreadcrumb({
+            category: ACTION_BREADCRUMB_CATEGORY,
+            data: transformedAction,
+            type: ACTION_BREADCRUMB_TYPE,
+          });
+        }
 
-          /* Allow user to configure scope with latest state */
-          // eslint-disable-next-line @typescript-eslint/unbound-method
-          const { configureScopeWithState } = options;
-          if (typeof configureScopeWithState === 'function') {
-            configureScopeWithState(scope, newState);
-          }
-        });
+        /* Set latest state to scope */
+        const transformedState = options.stateTransformer(newState);
+        if (typeof transformedState !== 'undefined' && transformedState !== null) {
+          const client = getClient();
+          const options = client?.getOptions();
+          const normalizationDepth = options?.normalizeDepth || 3; // default state normalization depth to 3
+
+          // Set the normalization depth of the redux state to the configured `normalizeDepth` option or a sane number as a fallback
+          const newStateContext = { state: { type: 'redux', value: transformedState } };
+          addNonEnumerableProperty(
+            newStateContext,
+            '__sentry_override_normalization_depth__',
+            3 + // 3 layers for `state.value.transformedState`
+              normalizationDepth, // rest for the actual state
+          );
+
+          scope.setContext('state', newStateContext);
+        } else {
+          scope.setContext('state', null);
+        }
+
+        /* Allow user to configure scope with latest state */
+        const { configureScopeWithState } = options;
+        if (typeof configureScopeWithState === 'function') {
+          configureScopeWithState(scope, newState);
+        }
 
         return newState;
       };

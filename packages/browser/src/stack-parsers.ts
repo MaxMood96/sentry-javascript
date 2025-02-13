@@ -1,8 +1,30 @@
-import { StackFrame } from '@sentry/types';
-import { StackLineParser, StackLineParserFn } from '@sentry/utils';
+// This was originally forked from https://github.com/csnover/TraceKit, and was largely
+// re - written as part of raven - js.
+//
+// This code was later copied to the JavaScript mono - repo and further modified and
+// refactored over the years.
 
-// global reference to slice
-const UNKNOWN_FUNCTION = '?';
+// Copyright (c) 2013 Onur Can Cakmak onur.cakmak@gmail.com and all TraceKit contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files(the 'Software'), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify,
+// merge, publish, distribute, sublicense, and / or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to the following
+// conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+import { UNKNOWN_FUNCTION, createStackParser } from '@sentry/core';
+import type { StackFrame, StackLineParser, StackLineParserFn } from '@sentry/core';
 
 const OPERA10_PRIORITY = 10;
 const OPERA11_PRIORITY = 20;
@@ -13,9 +35,8 @@ const GECKO_PRIORITY = 50;
 function createFrame(filename: string, func: string, lineno?: number, colno?: number): StackFrame {
   const frame: StackFrame = {
     filename,
-    function: func,
-    // All browser frames are considered in_app
-    in_app: true,
+    function: func === '<anonymous>' ? UNKNOWN_FUNCTION : func,
+    in_app: true, // All browser frames are considered in_app
   };
 
   if (lineno !== undefined) {
@@ -29,19 +50,36 @@ function createFrame(filename: string, func: string, lineno?: number, colno?: nu
   return frame;
 }
 
-// Chromium based browsers: Chrome, Brave, new Opera, new Edge
+// This regex matches frames that have no function name (ie. are at the top level of a module).
+// For example "at http://localhost:5000//script.js:1:126"
+// Frames _with_ function names usually look as follows: "at commitLayoutEffects (react-dom.development.js:23426:1)"
+const chromeRegexNoFnName = /^\s*at (\S+?)(?::(\d+))(?::(\d+))\s*$/i;
+
+// This regex matches all the frames that have a function name.
 const chromeRegex =
-  /^\s*at (?:(.*?) ?\((?:address at )?)?((?:file|https?|blob|chrome-extension|address|native|eval|webpack|<anonymous>|[-a-z]+:|.*bundle|\/).*?)(?::(\d+))?(?::(\d+))?\)?\s*$/i;
+  /^\s*at (?:(.+?\)(?: \[.+\])?|.*?) ?\((?:address at )?)?(?:async )?((?:<anonymous>|[-a-z]+:|.*bundle|\/)?.*?)(?::(\d+))?(?::(\d+))?\)?\s*$/i;
+
 const chromeEvalRegex = /\((\S*)(?::(\d+))(?::(\d+))\)/;
 
-const chrome: StackLineParserFn = line => {
-  const parts = chromeRegex.exec(line);
+// Chromium based browsers: Chrome, Brave, new Opera, new Edge
+// We cannot call this variable `chrome` because it can conflict with global `chrome` variable in certain environments
+// See: https://github.com/getsentry/sentry-javascript/issues/6880
+const chromeStackParserFn: StackLineParserFn = line => {
+  // If the stack line has no function name, we need to parse it differently
+  const noFnParts = chromeRegexNoFnName.exec(line) as null | [string, string, string, string];
+
+  if (noFnParts) {
+    const [, filename, line, col] = noFnParts;
+    return createFrame(filename, UNKNOWN_FUNCTION, +line, +col);
+  }
+
+  const parts = chromeRegex.exec(line) as null | [string, string, string, string, string];
 
   if (parts) {
     const isEval = parts[2] && parts[2].indexOf('eval') === 0; // start of line
 
     if (isEval) {
-      const subMatch = chromeEvalRegex.exec(parts[2]);
+      const subMatch = chromeEvalRegex.exec(parts[2]) as null | [string, string, string, string];
 
       if (subMatch) {
         // throw out eval line/column and use top-most line/column number
@@ -61,22 +99,22 @@ const chrome: StackLineParserFn = line => {
   return;
 };
 
-export const chromeStackParser: StackLineParser = [CHROME_PRIORITY, chrome];
+export const chromeStackLineParser: StackLineParser = [CHROME_PRIORITY, chromeStackParserFn];
 
 // gecko regex: `(?:bundle|\d+\.js)`: `bundle` is for react native, `\d+\.js` also but specifically for ram bundles because it
 // generates filenames without a prefix like `file://` the filenames in the stacktrace are just 42.js
 // We need this specific case for now because we want no other regex to match.
 const geckoREgex =
-  /^\s*(.*?)(?:\((.*?)\))?(?:^|@)?((?:file|https?|blob|chrome|webpack|resource|moz-extension|capacitor).*?:\/.*?|\[native code\]|[^@]*(?:bundle|\d+\.js)|\/[\w\-. /=]+)(?::(\d+))?(?::(\d+))?\s*$/i;
+  /^\s*(.*?)(?:\((.*?)\))?(?:^|@)?((?:[-a-z]+)?:\/.*?|\[native code\]|[^@]*(?:bundle|\d+\.js)|\/[\w\-. /=]+)(?::(\d+))?(?::(\d+))?\s*$/i;
 const geckoEvalRegex = /(\S+) line (\d+)(?: > eval line \d+)* > eval/i;
 
 const gecko: StackLineParserFn = line => {
-  const parts = geckoREgex.exec(line);
+  const parts = geckoREgex.exec(line) as null | [string, string, string, string, string, string];
 
   if (parts) {
     const isEval = parts[3] && parts[3].indexOf(' > eval') > -1;
     if (isEval) {
-      const subMatch = geckoEvalRegex.exec(parts[3]);
+      const subMatch = geckoEvalRegex.exec(parts[3]) as null | [string, string, string];
 
       if (subMatch) {
         // throw out eval line/column and use top-most line number
@@ -97,39 +135,42 @@ const gecko: StackLineParserFn = line => {
   return;
 };
 
-export const geckoStackParser: StackLineParser = [GECKO_PRIORITY, gecko];
+export const geckoStackLineParser: StackLineParser = [GECKO_PRIORITY, gecko];
 
-const winjsRegex =
-  /^\s*at (?:((?:\[object object\])?.+) )?\(?((?:file|ms-appx|https?|webpack|blob):.*?):(\d+)(?::(\d+))?\)?\s*$/i;
+const winjsRegex = /^\s*at (?:((?:\[object object\])?.+) )?\(?((?:[-a-z]+):.*?):(\d+)(?::(\d+))?\)?\s*$/i;
 
 const winjs: StackLineParserFn = line => {
-  const parts = winjsRegex.exec(line);
+  const parts = winjsRegex.exec(line) as null | [string, string, string, string, string];
 
   return parts
     ? createFrame(parts[2], parts[1] || UNKNOWN_FUNCTION, +parts[3], parts[4] ? +parts[4] : undefined)
     : undefined;
 };
 
-export const winjsStackParser: StackLineParser = [WINJS_PRIORITY, winjs];
+export const winjsStackLineParser: StackLineParser = [WINJS_PRIORITY, winjs];
 
 const opera10Regex = / line (\d+).*script (?:in )?(\S+)(?:: in function (\S+))?$/i;
 
 const opera10: StackLineParserFn = line => {
-  const parts = opera10Regex.exec(line);
+  const parts = opera10Regex.exec(line) as null | [string, string, string, string];
   return parts ? createFrame(parts[2], parts[3] || UNKNOWN_FUNCTION, +parts[1]) : undefined;
 };
 
-export const opera10StackParser: StackLineParser = [OPERA10_PRIORITY, opera10];
+export const opera10StackLineParser: StackLineParser = [OPERA10_PRIORITY, opera10];
 
 const opera11Regex =
   / line (\d+), column (\d+)\s*(?:in (?:<anonymous function: ([^>]+)>|([^)]+))\(.*\))? in (.*):\s*$/i;
 
 const opera11: StackLineParserFn = line => {
-  const parts = opera11Regex.exec(line);
+  const parts = opera11Regex.exec(line) as null | [string, string, string, string, string, string];
   return parts ? createFrame(parts[5], parts[3] || parts[4] || UNKNOWN_FUNCTION, +parts[1], +parts[2]) : undefined;
 };
 
-export const opera11StackParser: StackLineParser = [OPERA11_PRIORITY, opera11];
+export const opera11StackLineParser: StackLineParser = [OPERA11_PRIORITY, opera11];
+
+export const defaultStackLineParsers = [chromeStackLineParser, geckoStackLineParser];
+
+export const defaultStackParser = createStackParser(...defaultStackLineParsers);
 
 /**
  * Safari web extensions, starting version unknown, can produce "frames-only" stacktraces.
@@ -157,7 +198,7 @@ const extractSafariExtensionDetails = (func: string, filename: string): [string,
 
   return isSafariExtension || isSafariWebExtension
     ? [
-        func.indexOf('@') !== -1 ? func.split('@')[0] : UNKNOWN_FUNCTION,
+        func.indexOf('@') !== -1 ? (func.split('@')[0] as string) : UNKNOWN_FUNCTION,
         isSafariExtension ? `safari-extension:${filename}` : `safari-web-extension:${filename}`,
       ]
     : [func, filename];

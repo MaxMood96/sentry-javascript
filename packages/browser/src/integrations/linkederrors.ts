@@ -1,77 +1,41 @@
-import { addGlobalEventProcessor, getCurrentHub } from '@sentry/core';
-import { Event, EventHint, Exception, ExtendedError, Integration } from '@sentry/types';
-import { isInstanceOf } from '@sentry/utils';
-
+import type { IntegrationFn } from '@sentry/core';
+import { applyAggregateErrorsToEvent, defineIntegration } from '@sentry/core';
 import { exceptionFromError } from '../eventbuilder';
+
+interface LinkedErrorsOptions {
+  key?: string;
+  limit?: number;
+}
 
 const DEFAULT_KEY = 'cause';
 const DEFAULT_LIMIT = 5;
 
-interface LinkedErrorsOptions {
-  key: string;
-  limit: number;
-}
+const INTEGRATION_NAME = 'LinkedErrors';
 
-/** Adds SDK info to an event. */
-export class LinkedErrors implements Integration {
-  /**
-   * @inheritDoc
-   */
-  public static id: string = 'LinkedErrors';
+const _linkedErrorsIntegration = ((options: LinkedErrorsOptions = {}) => {
+  const limit = options.limit || DEFAULT_LIMIT;
+  const key = options.key || DEFAULT_KEY;
 
-  /**
-   * @inheritDoc
-   */
-  public readonly name: string = LinkedErrors.id;
+  return {
+    name: INTEGRATION_NAME,
+    preprocessEvent(event, hint, client) {
+      const options = client.getOptions();
 
-  /**
-   * @inheritDoc
-   */
-  private readonly _key: LinkedErrorsOptions['key'];
-
-  /**
-   * @inheritDoc
-   */
-  private readonly _limit: LinkedErrorsOptions['limit'];
-
-  /**
-   * @inheritDoc
-   */
-  public constructor(options: Partial<LinkedErrorsOptions> = {}) {
-    this._key = options.key || DEFAULT_KEY;
-    this._limit = options.limit || DEFAULT_LIMIT;
-  }
-
-  /**
-   * @inheritDoc
-   */
-  public setupOnce(): void {
-    addGlobalEventProcessor((event: Event, hint?: EventHint) => {
-      const self = getCurrentHub().getIntegration(LinkedErrors);
-      return self ? _handler(self._key, self._limit, event, hint) : event;
-    });
-  }
-}
+      applyAggregateErrorsToEvent(
+        // This differs from the LinkedErrors integration in core by using a different exceptionFromError function
+        exceptionFromError,
+        options.stackParser,
+        options.maxValueLength,
+        key,
+        limit,
+        event,
+        hint,
+      );
+    },
+  };
+}) satisfies IntegrationFn;
 
 /**
- * @inheritDoc
+ * Aggregrate linked errors in an event.
  */
-export function _handler(key: string, limit: number, event: Event, hint?: EventHint): Event | null {
-  if (!event.exception || !event.exception.values || !hint || !isInstanceOf(hint.originalException, Error)) {
-    return event;
-  }
-  const linkedErrors = _walkErrorTree(limit, hint.originalException as ExtendedError, key);
-  event.exception.values = [...linkedErrors, ...event.exception.values];
-  return event;
-}
-
-/**
- * JSDOC
- */
-export function _walkErrorTree(limit: number, error: ExtendedError, key: string, stack: Exception[] = []): Exception[] {
-  if (!isInstanceOf(error[key], Error) || stack.length + 1 >= limit) {
-    return stack;
-  }
-  const exception = exceptionFromError(error[key]);
-  return _walkErrorTree(limit, error[key], key, [exception, ...stack]);
-}
+export const linkedErrorsIntegration = defineIntegration(_linkedErrorsIntegration);

@@ -1,8 +1,45 @@
-import { EventProcessor, Hub, Integration } from '@sentry/types';
-import { existsSync, readFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import type { IntegrationFn } from '@sentry/core';
+import { defineIntegration, logger } from '@sentry/core';
+import { DEBUG_BUILD } from '../debug-build';
+import { isCjs } from '../utils/commonjs';
 
 let moduleCache: { [key: string]: string };
+
+const INTEGRATION_NAME = 'Modules';
+
+const _modulesIntegration = (() => {
+  // This integration only works in CJS contexts
+  if (!isCjs()) {
+    DEBUG_BUILD &&
+      logger.warn(
+        'modulesIntegration only works in CommonJS (CJS) environments. Remove this integration if you are using ESM.',
+      );
+    return {
+      name: INTEGRATION_NAME,
+    };
+  }
+
+  return {
+    name: INTEGRATION_NAME,
+    processEvent(event) {
+      event.modules = {
+        ...event.modules,
+        ..._getModules(),
+      };
+
+      return event;
+    },
+  };
+}) satisfies IntegrationFn;
+
+/**
+ * Add node modules / packages to the event.
+ *
+ * Only works in CommonJS (CJS) environments.
+ */
+export const modulesIntegration = defineIntegration(_modulesIntegration);
 
 /** Extract information about paths */
 function getPaths(): string[] {
@@ -17,7 +54,7 @@ function getPaths(): string[] {
 function collectModules(): {
   [name: string]: string;
 } {
-  const mainPaths = (require.main && require.main.paths) || [];
+  const mainPaths = require.main?.paths || [];
   const paths = getPaths();
   const infos: {
     [name: string]: string;
@@ -65,38 +102,10 @@ function collectModules(): {
   return infos;
 }
 
-/** Add node modules / packages to the event */
-export class Modules implements Integration {
-  /**
-   * @inheritDoc
-   */
-  public static id: string = 'Modules';
-
-  /**
-   * @inheritDoc
-   */
-  public name: string = Modules.id;
-
-  /**
-   * @inheritDoc
-   */
-  public setupOnce(addGlobalEventProcessor: (callback: EventProcessor) => void, getCurrentHub: () => Hub): void {
-    addGlobalEventProcessor(event => {
-      if (!getCurrentHub().getIntegration(Modules)) {
-        return event;
-      }
-      return {
-        ...event,
-        modules: this._getModules(),
-      };
-    });
+/** Fetches the list of modules and the versions loaded by the entry file for your node.js app. */
+function _getModules(): { [key: string]: string } {
+  if (!moduleCache) {
+    moduleCache = collectModules();
   }
-
-  /** Fetches the list of modules and the versions loaded by the entry file for your node.js app. */
-  private _getModules(): { [key: string]: string } {
-    if (!moduleCache) {
-      moduleCache = collectModules();
-    }
-    return moduleCache;
-  }
+  return moduleCache;
 }

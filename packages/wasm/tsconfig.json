@@ -4,7 +4,6 @@
   "include": ["src/**/*"],
 
   "compilerOptions": {
-    // package-specific options
-    "esModuleInterop": true,
+    "lib": ["DOM", "ES2018"],
   }
 }

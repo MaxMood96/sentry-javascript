@@ -1,18 +1,15 @@
-import { Scope } from '@sentry/browser';
+import { Scope, getClient, setCurrentClient } from '@sentry/browser';
+import type { Client } from '@sentry/core';
 import { fireEvent, render, screen } from '@testing-library/react';
 import * as React from 'react';
 import { useState } from 'react';
 
-import {
-  ErrorBoundary,
-  ErrorBoundaryProps,
-  isAtLeastReact17,
-  UNKNOWN_COMPONENT,
-  withErrorBoundary,
-} from '../src/errorboundary';
+import type { ErrorBoundaryProps, FallbackRender } from '../src/errorboundary';
+import { ErrorBoundary, UNKNOWN_COMPONENT, withErrorBoundary } from '../src/errorboundary';
 
 const mockCaptureException = jest.fn();
 const mockShowReportDialog = jest.fn();
+const mockClientOn = jest.fn();
 const EVENT_ID = 'test-id-123';
 
 jest.mock('@sentry/browser', () => {
@@ -38,7 +35,26 @@ function Bam(): JSX.Element {
   return <Boo title={title} />;
 }
 
-const TestApp: React.FC<ErrorBoundaryProps> = ({ children, ...props }) => {
+function EffectSpyFallback({ error }: { error: unknown }): JSX.Element {
+  const [counter, setCounter] = useState(0);
+
+  React.useEffect(() => {
+    setCounter(c => c + 1);
+  }, []);
+
+  return (
+    <span>
+      EffectSpyFallback {counter} - {(error as Error).message}
+    </span>
+  );
+}
+
+interface TestAppProps extends ErrorBoundaryProps {
+  errorComp?: JSX.Element;
+}
+
+const TestApp: React.FC<TestAppProps> = ({ children, errorComp, ...props }): any => {
+  const customErrorComp = errorComp || <Bam />;
   const [isError, setError] = React.useState(false);
   return (
     <ErrorBoundary
@@ -50,7 +66,7 @@ const TestApp: React.FC<ErrorBoundaryProps> = ({ children, ...props }) => {
         }
       }}
     >
-      {isError ? <Bam /> : children}
+      {isError ? customErrorComp : children}
       <button
         data-testid="errorBtn"
         onClick={() => {
@@ -81,11 +97,12 @@ describe('ErrorBoundary', () => {
   afterEach(() => {
     mockCaptureException.mockClear();
     mockShowReportDialog.mockClear();
+    mockClientOn.mockClear();
   });
 
   it('renders null if not given a valid `fallback` prop', () => {
     const { container } = render(
-      // @ts-ignore Passing wrong type on purpose
+      // @ts-expect-error Passing wrong type on purpose
       <ErrorBoundary fallback="Not a ReactElement">
         <Bam />
       </ErrorBoundary>,
@@ -96,8 +113,8 @@ describe('ErrorBoundary', () => {
 
   it('renders null if not given a valid `fallback` prop function', () => {
     const { container } = render(
-      // @ts-ignore Passing wrong type on purpose
-      <ErrorBoundary fallback={() => 'Not a ReactElement'}>
+      // @ts-expect-error Passing wrong type on purpose
+      <ErrorBoundary fallback={() => undefined}>
         <Bam />
       </ErrorBoundary>,
     );
@@ -112,6 +129,15 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>,
     );
     expect(container.innerHTML).toBe('<h1>Error Component</h1>');
+  });
+
+  it('renders a fallback that can use react hooks', () => {
+    const { container } = render(
+      <ErrorBoundary fallback={EffectSpyFallback}>
+        <Bam />
+      </ErrorBoundary>,
+    );
+    expect(container.innerHTML).toBe('<span>EffectSpyFallback 1 - boom</span>');
   });
 
   it('calls `onMount` when mounted', () => {
@@ -235,7 +261,10 @@ describe('ErrorBoundary', () => {
 
       expect(mockCaptureException).toHaveBeenCalledTimes(1);
       expect(mockCaptureException).toHaveBeenLastCalledWith(expect.any(Error), {
-        contexts: { react: { componentStack: expect.any(String) } },
+        captureContext: {
+          contexts: { react: { componentStack: expect.any(String) } },
+        },
+        mechanism: { handled: true },
       });
 
       expect(mockOnError.mock.calls[0][0]).toEqual(mockCaptureException.mock.calls[0][0]);
@@ -243,9 +272,151 @@ describe('ErrorBoundary', () => {
       // Check if error.cause -> react component stack
       const error = mockCaptureException.mock.calls[0][0];
       const cause = error.cause;
-      expect(cause.stack).toEqual(mockCaptureException.mock.calls[0][1].contexts.react.componentStack);
+      expect(cause.stack).toEqual(mockCaptureException.mock.calls[0][1]?.captureContext.contexts.react.componentStack);
       expect(cause.name).toContain('React ErrorBoundary');
       expect(cause.message).toEqual(error.message);
+    });
+
+    // Regression test against:
+    // https://github.com/getsentry/sentry-javascript/issues/6167
+    it('does not set cause if non Error objected is thrown', () => {
+      const TestAppThrowingString: React.FC<ErrorBoundaryProps> = ({ children, ...props }) => {
+        const [isError, setError] = React.useState(false);
+        function StringBam(): JSX.Element {
+          throw 'bam';
+        }
+        return (
+          <ErrorBoundary
+            {...props}
+            onReset={(...args) => {
+              setError(false);
+              if (props.onReset) {
+                props.onReset(...args);
+              }
+            }}
+          >
+            {isError ? <StringBam /> : children}
+            <button
+              data-testid="errorBtn"
+              onClick={() => {
+                setError(true);
+              }}
+            />
+          </ErrorBoundary>
+        );
+      };
+
+      render(
+        <TestAppThrowingString fallback={<p>You have hit an error</p>}>
+          <h1>children</h1>
+        </TestAppThrowingString>,
+      );
+
+      expect(mockCaptureException).toHaveBeenCalledTimes(0);
+
+      const btn = screen.getByTestId('errorBtn');
+      fireEvent.click(btn);
+
+      expect(mockCaptureException).toHaveBeenCalledTimes(1);
+      expect(mockCaptureException).toHaveBeenLastCalledWith('bam', {
+        captureContext: {
+          contexts: { react: { componentStack: expect.any(String) } },
+        },
+        mechanism: { handled: true },
+      });
+
+      // Check if error.cause -> react component stack
+      const error = mockCaptureException.mock.calls[0][0];
+      expect(error.cause).not.toBeDefined();
+    });
+
+    it('handles when `error.cause` is nested', () => {
+      const mockOnError = jest.fn();
+
+      function CustomBam(): JSX.Element {
+        const firstError = new Error('bam');
+        const secondError = new Error('bam2');
+        const thirdError = new Error('bam3');
+        // @ts-expect-error Need to set cause on error
+        secondError.cause = firstError;
+        // @ts-expect-error Need to set cause on error
+        thirdError.cause = secondError;
+        throw thirdError;
+      }
+
+      render(
+        <TestApp fallback={<p>You have hit an error</p>} onError={mockOnError} errorComp={<CustomBam />}>
+          <h1>children</h1>
+        </TestApp>,
+      );
+
+      expect(mockOnError).toHaveBeenCalledTimes(0);
+      expect(mockCaptureException).toHaveBeenCalledTimes(0);
+
+      const btn = screen.getByTestId('errorBtn');
+      fireEvent.click(btn);
+
+      expect(mockCaptureException).toHaveBeenCalledTimes(1);
+      expect(mockCaptureException).toHaveBeenLastCalledWith(expect.any(Error), {
+        captureContext: {
+          contexts: { react: { componentStack: expect.any(String) } },
+        },
+        mechanism: { handled: true },
+      });
+
+      expect(mockOnError.mock.calls[0][0]).toEqual(mockCaptureException.mock.calls[0][0]);
+
+      const thirdError = mockCaptureException.mock.calls[0][0];
+      const secondError = thirdError.cause;
+      const firstError = secondError.cause;
+      const cause = firstError.cause;
+      expect(cause.stack).toEqual(mockCaptureException.mock.calls[0][1]?.captureContext.contexts.react.componentStack);
+      expect(cause.name).toContain('React ErrorBoundary');
+      expect(cause.message).toEqual(thirdError.message);
+    });
+
+    it('handles when `error.cause` is recursive', () => {
+      const mockOnError = jest.fn();
+
+      function CustomBam(): JSX.Element {
+        const firstError = new Error('bam');
+        const secondError = new Error('bam2');
+        // @ts-expect-error Need to set cause on error
+        firstError.cause = secondError;
+        // @ts-expect-error Need to set cause on error
+        secondError.cause = firstError;
+        throw firstError;
+      }
+
+      render(
+        <TestApp fallback={<p>You have hit an error</p>} onError={mockOnError} errorComp={<CustomBam />}>
+          <h1>children</h1>
+        </TestApp>,
+      );
+
+      expect(mockOnError).toHaveBeenCalledTimes(0);
+      expect(mockCaptureException).toHaveBeenCalledTimes(0);
+
+      const btn = screen.getByTestId('errorBtn');
+      fireEvent.click(btn);
+
+      expect(mockCaptureException).toHaveBeenCalledTimes(1);
+      expect(mockCaptureException).toHaveBeenLastCalledWith(expect.any(Error), {
+        captureContext: {
+          contexts: { react: { componentStack: expect.any(String) } },
+        },
+        mechanism: { handled: true },
+      });
+
+      expect(mockOnError.mock.calls[0][0]).toEqual(mockCaptureException.mock.calls[0][0]);
+
+      const error = mockCaptureException.mock.calls[0][0];
+      const cause = error.cause;
+      // We need to make sure that recursive error.cause does not cause infinite loop
+      expect(cause.stack).not.toEqual(
+        mockCaptureException.mock.calls[0][1]?.captureContext.contexts.react.componentStack,
+      );
+      expect(cause.name).not.toContain('React ErrorBoundary');
     });
 
     it('calls `beforeCapture()` when an error occurs', () => {
@@ -273,7 +444,9 @@ describe('ErrorBoundary', () => {
       expect(mockCaptureException).toHaveBeenCalledTimes(1);
     });
 
-    it('shows a Sentry Report Dialog with correct options', () => {
+    it('shows a Sentry Report Dialog with correct options if client does not have hooks', () => {
+      expect(getClient()).toBeUndefined();
+
       const options = { title: 'custom title' };
       render(
         <TestApp fallback={<p>You have hit an error</p>} showDialog dialogOptions={options}>
@@ -288,6 +461,40 @@ describe('ErrorBoundary', () => {
 
       expect(mockShowReportDialog).toHaveBeenCalledTimes(1);
       expect(mockShowReportDialog).toHaveBeenCalledWith({ ...options, eventId: EVENT_ID });
+    });
+
+    it('shows a Sentry Report Dialog with correct options if client has hooks', () => {
+      let callback: any;
+
+      const clientBefore = getClient();
+
+      const client = {
+        on: (name: string, cb: any) => {
+          callback = cb;
+        },
+      } as Client;
+
+      setCurrentClient(client);
+
+      const options = { title: 'custom title' };
+      render(
+        <TestApp fallback={<p>You have hit an error</p>} showDialog dialogOptions={options}>
+          <h1>children</h1>
+        </TestApp>,
+      );
+
+      expect(mockShowReportDialog).toHaveBeenCalledTimes(0);
+
+      const btn = screen.getByTestId('errorBtn');
+      fireEvent.click(btn);
+
+      // Simulate hook being fired
+      callback({ event_id: EVENT_ID });
+
+      expect(mockShowReportDialog).toHaveBeenCalledTimes(1);
+      expect(mockShowReportDialog).toHaveBeenCalledWith({ ...options, eventId: EVENT_ID });
+
+      setCurrentClient(clientBefore!);
     });
 
     it('resets to initial state when reset', async () => {
@@ -330,20 +537,47 @@ describe('ErrorBoundary', () => {
       expect(mockOnReset).toHaveBeenCalledTimes(1);
       expect(mockOnReset).toHaveBeenCalledWith(expect.any(Error), expect.any(String), expect.any(String));
     });
-  });
-});
+    it.each`
+      fallback | handled      | expected
+      ${true}  | ${undefined} | ${true}
+      ${false} | ${undefined} | ${false}
+      ${true}  | ${false}     | ${false}
+      ${true}  | ${true}      | ${true}
+      ${false} | ${true}      | ${true}
+      ${false} | ${false}     | ${false}
+    `(
+      'sets `handled: $expected` when `handled` is $handled and `fallback` is $fallback',
+      async ({
+        fallback,
+        handled,
+        expected,
+      }: {
+        fallback: boolean;
+        handled: boolean | undefined;
+        expected: boolean;
+      }) => {
+        const fallbackComponent: FallbackRender | undefined = fallback
+          ? ({ resetError }) => <button data-testid="reset" onClick={resetError} />
+          : undefined;
+        render(
+          <TestApp handled={handled} fallback={fallbackComponent}>
+            <h1>children</h1>
+          </TestApp>,
+        );
 
-describe('isAtLeastReact17', () => {
-  test.each([
-    ['React 15 with no patch', '15.0', false],
-    ['React 15 with no patch and no minor', '15.5', false],
-    ['React 16', '16.0.4', false],
-    ['React 17', '17.0.0', true],
-    ['React 17 with no patch', '17.4', true],
-    ['React 17 with no patch and no minor', '17', true],
-    ['React 18', '18.1.0', true],
-    ['React 19', '19.0.0', true],
-  ])('%s', (_: string, input: string, output: ReturnType<typeof isAtLeastReact17>) => {
-    expect(isAtLeastReact17(input)).toBe(output);
+        expect(mockCaptureException).toHaveBeenCalledTimes(0);
+
+        const btn = screen.getByTestId('errorBtn');
+        fireEvent.click(btn);
+
+        expect(mockCaptureException).toHaveBeenCalledTimes(1);
+        expect(mockCaptureException).toHaveBeenLastCalledWith(expect.any(Object), {
+          captureContext: {
+            contexts: { react: { componentStack: expect.any(String) } },
+          },
+          mechanism: { handled: expected },
+        });
+      },
+    );
   });
 });

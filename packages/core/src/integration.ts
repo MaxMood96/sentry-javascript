@@ -1,67 +1,66 @@
-import { addGlobalEventProcessor, getCurrentHub } from '@sentry/hub';
-import { Integration, Options } from '@sentry/types';
-import { addNonEnumerableProperty, logger } from '@sentry/utils';
-
-import { IS_DEBUG_BUILD } from './flags';
+import type { Client } from './client';
+import { getClient } from './currentScopes';
+import { DEBUG_BUILD } from './debug-build';
+import type { Event, EventHint, Integration, IntegrationFn, Options } from './types-hoist';
+import { logger } from './utils-hoist/logger';
 
 export const installedIntegrations: string[] = [];
 
 /** Map of integrations assigned to a client */
 export type IntegrationIndex = {
   [key: string]: Integration;
-} & { initialized?: boolean };
+};
+
+type IntegrationWithDefaultInstance = Integration & { isDefaultInstance?: true };
 
 /**
+ * Remove duplicates from the given array, preferring the last instance of any duplicate. Not guaranteed to
+ * preserve the order of integrations in the array.
+ *
  * @private
  */
 function filterDuplicates(integrations: Integration[]): Integration[] {
-  return integrations.reduce((acc, integrations) => {
-    if (acc.every(accIntegration => integrations.name !== accIntegration.name)) {
-      acc.push(integrations);
+  const integrationsByName: { [key: string]: Integration } = {};
+
+  integrations.forEach((currentInstance: IntegrationWithDefaultInstance) => {
+    const { name } = currentInstance;
+
+    const existingInstance: IntegrationWithDefaultInstance | undefined = integrationsByName[name];
+
+    // We want integrations later in the array to overwrite earlier ones of the same type, except that we never want a
+    // default instance to overwrite an existing user instance
+    if (existingInstance && !existingInstance.isDefaultInstance && currentInstance.isDefaultInstance) {
+      return;
     }
-    return acc;
-  }, [] as Integration[]);
+
+    integrationsByName[name] = currentInstance;
+  });
+
+  return Object.values(integrationsByName);
 }
 
-/** Gets integration to install */
-export function getIntegrationsToSetup(options: Options): Integration[] {
-  const defaultIntegrations = (options.defaultIntegrations && [...options.defaultIntegrations]) || [];
+/** Gets integrations to install */
+export function getIntegrationsToSetup(options: Pick<Options, 'defaultIntegrations' | 'integrations'>): Integration[] {
+  const defaultIntegrations = options.defaultIntegrations || [];
   const userIntegrations = options.integrations;
 
-  let integrations: Integration[] = [...filterDuplicates(defaultIntegrations)];
+  // We flag default instances, so that later we can tell them apart from any user-created instances of the same class
+  defaultIntegrations.forEach((integration: IntegrationWithDefaultInstance) => {
+    integration.isDefaultInstance = true;
+  });
+
+  let integrations: Integration[];
 
   if (Array.isArray(userIntegrations)) {
-    // Filter out integrations that are also included in user options
-    integrations = [
-      ...integrations.filter(integrations =>
-        userIntegrations.every(userIntegration => userIntegration.name !== integrations.name),
-      ),
-      // And filter out duplicated user options integrations
-      ...filterDuplicates(userIntegrations),
-    ];
+    integrations = [...defaultIntegrations, ...userIntegrations];
   } else if (typeof userIntegrations === 'function') {
-    integrations = userIntegrations(integrations);
-    integrations = Array.isArray(integrations) ? integrations : [integrations];
+    const resolvedUserIntegrations = userIntegrations(defaultIntegrations);
+    integrations = Array.isArray(resolvedUserIntegrations) ? resolvedUserIntegrations : [resolvedUserIntegrations];
+  } else {
+    integrations = defaultIntegrations;
   }
 
-  // Make sure that if present, `Debug` integration will always run last
-  const integrationsNames = integrations.map(i => i.name);
-  const alwaysLastToRun = 'Debug';
-  if (integrationsNames.indexOf(alwaysLastToRun) !== -1) {
-    integrations.push(...integrations.splice(integrationsNames.indexOf(alwaysLastToRun), 1));
-  }
-
-  return integrations;
-}
-
-/** Setup given integration */
-export function setupIntegration(integration: Integration): void {
-  if (installedIntegrations.indexOf(integration.name) !== -1) {
-    return;
-  }
-  integration.setupOnce(addGlobalEventProcessor, getCurrentHub);
-  installedIntegrations.push(integration.name);
-  IS_DEBUG_BUILD && logger.log(`Integration installed: ${integration.name}`);
+  return filterDuplicates(integrations);
 }
 
 /**
@@ -70,15 +69,84 @@ export function setupIntegration(integration: Integration): void {
  * @param integrations array of integration instances
  * @param withDefault should enable default integrations
  */
-export function setupIntegrations<O extends Options>(options: O): IntegrationIndex {
-  const integrations: IntegrationIndex = {};
-  getIntegrationsToSetup(options).forEach(integration => {
-    integrations[integration.name] = integration;
-    setupIntegration(integration);
+export function setupIntegrations(client: Client, integrations: Integration[]): IntegrationIndex {
+  const integrationIndex: IntegrationIndex = {};
+
+  integrations.forEach((integration: Integration | undefined) => {
+    // guard against empty provided integrations
+    if (integration) {
+      setupIntegration(client, integration, integrationIndex);
+    }
   });
-  // set the `initialized` flag so we don't run through the process again unecessarily; use `Object.defineProperty`
-  // because by default it creates a property which is nonenumerable, which we want since `initialized` shouldn't be
-  // considered a member of the index the way the actual integrations are
-  addNonEnumerableProperty(integrations, 'initialized', true);
-  return integrations;
+
+  return integrationIndex;
+}
+
+/**
+ * Execute the `afterAllSetup` hooks of the given integrations.
+ */
+export function afterSetupIntegrations(client: Client, integrations: Integration[]): void {
+  for (const integration of integrations) {
+    // guard against empty provided integrations
+    if (integration?.afterAllSetup) {
+      integration.afterAllSetup(client);
+    }
+  }
+}
+
+/** Setup a single integration.  */
+export function setupIntegration(client: Client, integration: Integration, integrationIndex: IntegrationIndex): void {
+  if (integrationIndex[integration.name]) {
+    DEBUG_BUILD && logger.log(`Integration skipped because it was already installed: ${integration.name}`);
+    return;
+  }
+  integrationIndex[integration.name] = integration;
+
+  // `setupOnce` is only called the first time
+  if (installedIntegrations.indexOf(integration.name) === -1 && typeof integration.setupOnce === 'function') {
+    integration.setupOnce();
+    installedIntegrations.push(integration.name);
+  }
+
+  // `setup` is run for each client
+  if (integration.setup && typeof integration.setup === 'function') {
+    integration.setup(client);
+  }
+
+  if (typeof integration.preprocessEvent === 'function') {
+    const callback = integration.preprocessEvent.bind(integration) as typeof integration.preprocessEvent;
+    client.on('preprocessEvent', (event, hint) => callback(event, hint, client));
+  }
+
+  if (typeof integration.processEvent === 'function') {
+    const callback = integration.processEvent.bind(integration) as typeof integration.processEvent;
+
+    const processor = Object.assign((event: Event, hint: EventHint) => callback(event, hint, client), {
+      id: integration.name,
+    });
+
+    client.addEventProcessor(processor);
+  }
+
+  DEBUG_BUILD && logger.log(`Integration installed: ${integration.name}`);
+}
+
+/** Add an integration to the current scope's client. */
+export function addIntegration(integration: Integration): void {
+  const client = getClient();
+
+  if (!client) {
+    DEBUG_BUILD && logger.warn(`Cannot add integration "${integration.name}" because no SDK Client is available.`);
+    return;
+  }
+
+  client.addIntegration(integration);
+}
+
+/**
+ * Define an integration function that can be used to create an integration instance.
+ * Note that this by design hides the implementation details of the integration, as they are considered internal.
+ */
+export function defineIntegration<Fn extends IntegrationFn>(fn: Fn): (...args: Parameters<Fn>) => Integration {
+  return fn;
 }

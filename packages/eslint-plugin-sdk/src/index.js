@@ -10,7 +10,10 @@
 
 module.exports = {
   rules: {
-    'no-async-await': require('./rules/no-async-await'),
     'no-eq-empty': require('./rules/no-eq-empty'),
+    'no-class-field-initializers': require('./rules/no-class-field-initializers'),
+    'no-regexp-constructor': require('./rules/no-regexp-constructor'),
+    'no-focused-tests': require('./rules/no-focused-tests'),
+    'no-skipped-tests': require('./rules/no-skipped-tests'),
   },
 };

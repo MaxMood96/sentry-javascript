@@ -1,83 +1,29 @@
-import { Envelope, EventStatus } from '@sentry/types';
+import { DEBUG_BUILD } from '../debug-build';
+import type {
+  Envelope,
+  EnvelopeItem,
+  EventDropReason,
+  InternalBaseTransportOptions,
+  Transport,
+  TransportMakeRequestResponse,
+  TransportRequestExecutor,
+} from '../types-hoist';
 import {
-  disabledUntil,
-  eventStatusFromHttpCode,
-  getEnvelopeType,
-  isRateLimited,
-  makePromiseBuffer,
-  PromiseBuffer,
-  RateLimits,
-  rejectedSyncPromise,
-  resolvedSyncPromise,
+  createEnvelope,
+  envelopeItemTypeToDataCategory,
+  forEachEnvelopeItem,
   serializeEnvelope,
-  updateRateLimits,
-} from '@sentry/utils';
+} from '../utils-hoist/envelope';
+import { SentryError } from '../utils-hoist/error';
+import { logger } from '../utils-hoist/logger';
+import { type PromiseBuffer, makePromiseBuffer } from '../utils-hoist/promisebuffer';
+import { type RateLimits, isRateLimited, updateRateLimits } from '../utils-hoist/ratelimit';
+import { resolvedSyncPromise } from '../utils-hoist/syncpromise';
 
-export const ERROR_TRANSPORT_CATEGORY = 'error';
-
-export const TRANSACTION_TRANSPORT_CATEGORY = 'transaction';
-
-export const ATTACHMENT_TRANSPORT_CATEGORY = 'attachment';
-
-export const SESSION_TRANSPORT_CATEGORY = 'session';
-
-type TransportCategory =
-  | typeof ERROR_TRANSPORT_CATEGORY
-  | typeof TRANSACTION_TRANSPORT_CATEGORY
-  | typeof ATTACHMENT_TRANSPORT_CATEGORY
-  | typeof SESSION_TRANSPORT_CATEGORY;
-
-export type TransportRequest = {
-  body: string;
-  category: TransportCategory;
-};
-
-export type TransportMakeRequestResponse = {
-  body?: string;
-  headers?: {
-    [key: string]: string | null;
-    'x-sentry-rate-limits': string | null;
-    'retry-after': string | null;
-  };
-  reason?: string;
-  statusCode: number;
-};
-
-export type TransportResponse = {
-  status: EventStatus;
-  reason?: string;
-};
-
-interface InternalBaseTransportOptions {
-  bufferSize?: number;
-}
-
-export interface BaseTransportOptions extends InternalBaseTransportOptions {
-  // url to send the event
-  // transport does not care about dsn specific - client should take care of
-  // parsing and figuring that out
-  url: string;
-}
-
-// TODO: Move into Browser Transport
-export interface BrowserTransportOptions extends BaseTransportOptions {
-  // options to pass into fetch request
-  fetchParams: Record<string, string>;
-  headers?: Record<string, string>;
-  sendClientReports?: boolean;
-}
-
-export interface NewTransport {
-  send(request: Envelope): PromiseLike<TransportResponse>;
-  flush(timeout?: number): PromiseLike<boolean>;
-}
-
-export type TransportRequestExecutor = (request: TransportRequest) => PromiseLike<TransportMakeRequestResponse>;
-
-export const DEFAULT_TRANSPORT_BUFFER_SIZE = 30;
+export const DEFAULT_TRANSPORT_BUFFER_SIZE = 64;
 
 /**
- * Creates a `NewTransport`
+ * Creates an instance of a Sentry `Transport`
  *
  * @param options
  * @param makeRequest
@@ -85,57 +31,73 @@ export const DEFAULT_TRANSPORT_BUFFER_SIZE = 30;
 export function createTransport(
   options: InternalBaseTransportOptions,
   makeRequest: TransportRequestExecutor,
-  buffer: PromiseBuffer<TransportResponse> = makePromiseBuffer(options.bufferSize || DEFAULT_TRANSPORT_BUFFER_SIZE),
-): NewTransport {
+  buffer: PromiseBuffer<TransportMakeRequestResponse> = makePromiseBuffer(
+    options.bufferSize || DEFAULT_TRANSPORT_BUFFER_SIZE,
+  ),
+): Transport {
   let rateLimits: RateLimits = {};
-
   const flush = (timeout?: number): PromiseLike<boolean> => buffer.drain(timeout);
 
-  function send(envelope: Envelope): PromiseLike<TransportResponse> {
-    const envCategory = getEnvelopeType(envelope);
-    const category = envCategory === 'event' ? 'error' : (envCategory as TransportCategory);
-    const request: TransportRequest = {
-      category,
-      body: serializeEnvelope(envelope),
-    };
+  function send(envelope: Envelope): PromiseLike<TransportMakeRequestResponse> {
+    const filteredEnvelopeItems: EnvelopeItem[] = [];
 
-    // Don't add to buffer if transport is already rate-limited
-    if (isRateLimited(rateLimits, category)) {
-      return rejectedSyncPromise({
-        status: 'rate_limit',
-        reason: getRateLimitReason(rateLimits, category),
-      });
+    // Drop rate limited items from envelope
+    forEachEnvelopeItem(envelope, (item, type) => {
+      const dataCategory = envelopeItemTypeToDataCategory(type);
+      if (isRateLimited(rateLimits, dataCategory)) {
+        options.recordDroppedEvent('ratelimit_backoff', dataCategory);
+      } else {
+        filteredEnvelopeItems.push(item);
+      }
+    });
+
+    // Skip sending if envelope is empty after filtering out rate limited events
+    if (filteredEnvelopeItems.length === 0) {
+      return resolvedSyncPromise({});
     }
 
-    const requestTask = (): PromiseLike<TransportResponse> =>
-      makeRequest(request).then(({ body, headers, reason, statusCode }): PromiseLike<TransportResponse> => {
-        const status = eventStatusFromHttpCode(statusCode);
-        if (headers) {
-          rateLimits = updateRateLimits(rateLimits, headers);
-        }
-        if (status === 'success') {
-          return resolvedSyncPromise({ status, reason });
-        }
-        return rejectedSyncPromise({
-          status,
-          reason:
-            reason ||
-            body ||
-            (status === 'rate_limit' ? getRateLimitReason(rateLimits, category) : 'Unknown transport error'),
-        });
-      });
+    const filteredEnvelope: Envelope = createEnvelope(envelope[0], filteredEnvelopeItems as (typeof envelope)[1]);
 
-    return buffer.add(requestTask);
+    // Creates client report for each item in an envelope
+    const recordEnvelopeLoss = (reason: EventDropReason): void => {
+      forEachEnvelopeItem(filteredEnvelope, (item, type) => {
+        options.recordDroppedEvent(reason, envelopeItemTypeToDataCategory(type));
+      });
+    };
+
+    const requestTask = (): PromiseLike<TransportMakeRequestResponse> =>
+      makeRequest({ body: serializeEnvelope(filteredEnvelope) }).then(
+        response => {
+          // We don't want to throw on NOK responses, but we want to at least log them
+          if (response.statusCode !== undefined && (response.statusCode < 200 || response.statusCode >= 300)) {
+            DEBUG_BUILD && logger.warn(`Sentry responded with status code ${response.statusCode} to sent event.`);
+          }
+
+          rateLimits = updateRateLimits(rateLimits, response);
+          return response;
+        },
+        error => {
+          recordEnvelopeLoss('network_error');
+          throw error;
+        },
+      );
+
+    return buffer.add(requestTask).then(
+      result => result,
+      error => {
+        if (error instanceof SentryError) {
+          DEBUG_BUILD && logger.error('Skipped sending event because buffer is full.');
+          recordEnvelopeLoss('queue_overflow');
+          return resolvedSyncPromise({});
+        } else {
+          throw error;
+        }
+      },
+    );
   }
 
   return {
     send,
     flush,
   };
-}
-
-function getRateLimitReason(rateLimits: RateLimits, category: TransportCategory): string {
-  return `Too many ${category} requests, backing off until: ${new Date(
-    disabledUntil(rateLimits, category),
-  ).toISOString()}`;
 }

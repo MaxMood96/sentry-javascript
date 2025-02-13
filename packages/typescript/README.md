@@ -1,8 +1,7 @@
 <p align="center">
-  <a href="https://sentry.io" target="_blank" align="center">
-    <img src="https://sentry-brand.storage.googleapis.com/sentry-logo-black.png" width="280">
+  <a href="https://sentry.io/?utm_source=github&utm_medium=logo" target="_blank">
+    <img src="https://sentry-brand.storage.googleapis.com/sentry-wordmark-dark-280x84.png" alt="Sentry" width="280" height="84">
   </a>
-  <br />
 </p>
 
 # Sentry TypeScript Configuration
@@ -10,8 +9,6 @@
 [![npm version](https://img.shields.io/npm/v/@sentry-internal/typescript.svg)](https://www.npmjs.com/package/@sentry-internal/typescript)
 [![npm dm](https://img.shields.io/npm/dm/@sentry-internal/typescript.svg)](https://www.npmjs.com/package/@sentry-internal/typescript)
 [![npm dt](https://img.shields.io/npm/dt/@sentry-internal/typescript.svg)](https://www.npmjs.com/package/@sentry-internal/typescript)
-
-[![typedoc](https://img.shields.io/badge/docs-typedoc-blue.svg)](http://getsentry.github.io/sentry-javascript/)
 
 ## Links
 
@@ -36,14 +33,6 @@ npm install --save-dev @sentry-internal/typescript
 
 Add the following config files to your project's root directory:
 
-**tslint.json**:
-
-```json
-{
-  "extends": "@sentry-internal/typescript/tslint"
-}
-```
-
 **tsconfig.json**:
 
 ```json
@@ -57,4 +46,5 @@ Add the following config files to your project's root directory:
 }
 ```
 
-For an example of how to use this package in a monorepo, check out this package's own parent repo, https://github.com/getsentry/sentry-javascript.
+For an example of how to use this package in a monorepo, check out this package's own parent repo,
+https://github.com/getsentry/sentry-javascript.

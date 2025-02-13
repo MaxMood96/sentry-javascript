@@ -1,11 +1,62 @@
-import { BaseClient, Scope, SDK_VERSION } from '@sentry/core';
-import { Event, EventHint } from '@sentry/types';
-import { getGlobalObject, logger } from '@sentry/utils';
+import type {
+  BrowserClientProfilingOptions,
+  BrowserClientReplayOptions,
+  ClientOptions,
+  Event,
+  EventHint,
+  Options,
+  ParameterizedString,
+  Scope,
+  SeverityLevel,
+} from '@sentry/core';
+import {
+  Client,
+  addAutoIpAddressToSession,
+  addAutoIpAddressToUser,
+  applySdkMetadata,
+  getSDKSource,
+} from '@sentry/core';
+import { eventFromException, eventFromMessage } from './eventbuilder';
+import { WINDOW } from './helpers';
+import type { BrowserTransportOptions } from './transports/types';
 
-import { BrowserBackend, BrowserOptions } from './backend';
-import { IS_DEBUG_BUILD } from './flags';
-import { injectReportDialog, ReportDialogOptions } from './helpers';
-import { Breadcrumbs } from './integrations';
+/**
+ * Configuration options for the Sentry Browser SDK.
+ * @see @sentry/core Options for more information.
+ */
+export type BrowserOptions = Options<BrowserTransportOptions> &
+  BrowserClientReplayOptions &
+  BrowserClientProfilingOptions & {
+    /**
+     * Important: Only set this option if you know what you are doing!
+     *
+     * By default, the SDK will check if `Sentry.init` is called in a browser extension.
+     * In case it is, it will stop initialization and log a warning
+     * because browser extensions require a different Sentry initialization process:
+     * https://docs.sentry.io/platforms/javascript/best-practices/shared-environments/
+     *
+     * Setting up the SDK in a browser extension with global error monitoring is not recommended
+     * and will likely flood you with errors from other web sites or extensions. This can heavily
+     * impact your quota and cause interference with your and other Sentry SDKs in shared environments.
+     *
+     * If this check wrongfully flags your setup as a browser extension, you can set this
+     * option to `true` to skip the check.
+     *
+     * @default false
+     */
+    skipBrowserExtensionCheck?: boolean;
+  };
+
+/**
+ * Configuration options for the Sentry Browser SDK Client class
+ * @see BrowserClient for more information.
+ */
+export type BrowserClientOptions = ClientOptions<BrowserTransportOptions> &
+  BrowserClientReplayOptions &
+  BrowserClientProfilingOptions & {
+    /** If configured, this URL will be used as base URL for lazy loading integration. */
+    cdnBaseUrl?: string;
+  };
 
 /**
  * The Sentry Browser SDK Client.
@@ -13,67 +64,66 @@ import { Breadcrumbs } from './integrations';
  * @see BrowserOptions for documentation on configuration options.
  * @see SentryClient for usage documentation.
  */
-export class BrowserClient extends BaseClient<BrowserBackend, BrowserOptions> {
+export class BrowserClient extends Client<BrowserClientOptions> {
   /**
    * Creates a new Browser SDK instance.
    *
    * @param options Configuration options for this SDK.
    */
-  public constructor(options: BrowserOptions = {}) {
-    options._metadata = options._metadata || {};
-    options._metadata.sdk = options._metadata.sdk || {
-      name: 'sentry.javascript.browser',
-      packages: [
-        {
-          name: 'npm:@sentry/browser',
-          version: SDK_VERSION,
-        },
-      ],
-      version: SDK_VERSION,
-    };
-
-    super(BrowserBackend, options);
-  }
-
-  /**
-   * Show a report dialog to the user to send feedback to a specific event.
-   *
-   * @param options Set individual options for the dialog
-   */
-  public showReportDialog(options: ReportDialogOptions = {}): void {
-    // doesn't work without a document (React Native)
-    const document = getGlobalObject<Window>().document;
-    if (!document) {
-      return;
-    }
-
-    if (!this._isEnabled()) {
-      IS_DEBUG_BUILD && logger.error('Trying to call showReportDialog with Sentry Client disabled');
-      return;
-    }
-
-    injectReportDialog({
+  public constructor(options: BrowserClientOptions) {
+    const opts = {
+      // We default this to true, as it is the safer scenario
+      parentSpanIsAlwaysRootSpan: true,
       ...options,
-      dsn: options.dsn || this.getDsn(),
-    });
-  }
+    };
+    const sdkSource = WINDOW.SENTRY_SDK_SOURCE || getSDKSource();
+    applySdkMetadata(opts, 'browser', ['browser'], sdkSource);
 
-  /**
-   * @inheritDoc
-   */
-  protected _prepareEvent(event: Event, scope?: Scope, hint?: EventHint): PromiseLike<Event | null> {
-    event.platform = event.platform || 'javascript';
-    return super._prepareEvent(event, scope, hint);
-  }
+    super(opts);
 
-  /**
-   * @inheritDoc
-   */
-  protected _sendEvent(event: Event): void {
-    const integration = this.getIntegration(Breadcrumbs);
-    if (integration) {
-      integration.addSentryBreadcrumb(event);
+    if (opts.sendClientReports && WINDOW.document) {
+      WINDOW.document.addEventListener('visibilitychange', () => {
+        if (WINDOW.document.visibilityState === 'hidden') {
+          this._flushOutcomes();
+        }
+      });
     }
-    super._sendEvent(event);
+
+    if (this._options.sendDefaultPii) {
+      this.on('postprocessEvent', addAutoIpAddressToUser);
+      this.on('beforeSendSession', addAutoIpAddressToSession);
+    }
+  }
+
+  /**
+   * @inheritDoc
+   */
+  public eventFromException(exception: unknown, hint?: EventHint): PromiseLike<Event> {
+    return eventFromException(this._options.stackParser, exception, hint, this._options.attachStacktrace);
+  }
+
+  /**
+   * @inheritDoc
+   */
+  public eventFromMessage(
+    message: ParameterizedString,
+    level: SeverityLevel = 'info',
+    hint?: EventHint,
+  ): PromiseLike<Event> {
+    return eventFromMessage(this._options.stackParser, message, level, hint, this._options.attachStacktrace);
+  }
+
+  /**
+   * @inheritDoc
+   */
+  protected _prepareEvent(
+    event: Event,
+    hint: EventHint,
+    currentScope: Scope,
+    isolationScope: Scope,
+  ): PromiseLike<Event | null> {
+    event.platform = event.platform || 'javascript';
+
+    return super._prepareEvent(event, hint, currentScope, isolationScope);
   }
 }
